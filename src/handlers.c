@@ -599,7 +599,7 @@ static size_t open_in_dropbox(struct req *q, struct resolved *r, uint16_t flags)
     /* O_EXCL is forced on regardless of what the client asked for; with
      * O_NOFOLLOW, a symlink planted here cannot redirect the write. */
     fd = openat(srv.inc_fd, tmp,
-                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0660);
     if (fd < 0)
         return reply_status(q, (uint8_t)tnfs_errno(errno));
 
@@ -643,7 +643,7 @@ static size_t h_open(struct req *q)
         return reply_status(q, TNFS_EINVAL);
     flags = get_u16(q->data);
     /* q->data + 2 is the client's mode argument, which is ignored: files are
-     * created 0600 as a default, not as a control. */
+     * created 0660 as a default, not as a control. */
     off = 4;
     if (want_string(q, &off, path, sizeof path) != 0)
         return reply_status(q, TNFS_EINVAL);

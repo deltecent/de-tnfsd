@@ -295,8 +295,11 @@ which combinations are safe, the daemon does not implement the operation.
   that already exists.
 - `O_NOFOLLOW` is forced on, so a symlink planted in the drop box by some
   other means cannot be used to redirect a write.
-- The client's mode argument is ignored. Files are created `0600` as a
-  sane default, not as a control — no part of the policy depends on it.
+- The client's mode argument is ignored. Files are created `0660` as a
+  sane default, not as a control — no part of the policy depends on it. The
+  mode exists to let the group that drains the drop box read what landed
+  there; nothing a client can do is affected by it, and the daemon sets its
+  own umask so the result does not depend on the environment.
 - The leaf name is validated: no leading dot, no path separators, no control
   characters, length capped, and a conservative charset. A rejected name gets
   `EINVAL`.

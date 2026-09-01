@@ -182,8 +182,11 @@ def main(transport="udp"):
         if os.path.isfile(landed):
             with open(landed, "rb") as f:
                 r.check(f.read() == body, "upload: contents are byte for byte")
-            r.check(statmod.S_IMODE(os.stat(landed).st_mode) == 0o600,
-                    "upload: the file is created 0600")
+            # 0660, and independent of the umask the daemon was started
+            # with: it sets its own (main.c), so the group that drains the
+            # drop box can read what landed regardless of the environment.
+            r.check(statmod.S_IMODE(os.stat(landed).st_mode) == 0o660,
+                    "upload: the file is created 0660")
         r.check(not any(n.startswith(".tmp-") for n in os.listdir(inc)),
                 "upload: no temp file is left behind")
 

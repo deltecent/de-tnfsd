@@ -54,7 +54,7 @@ under systemd (`de-tnfsd.service` ships a unit); when `$NOTIFY_SOCKET` is
 unset every part of the readiness protocol is a no-op, which is what makes
 the shell case work unchanged.
 
-Started as root, the daemon chroots to `<root>` and drops to `nobody` after
+Started as root, the daemon chroots to `<root>` and drops to `tnfs` after
 opening its directory fds — which is why the unit must not set `User=`.
 
 ## Permissions
@@ -78,6 +78,21 @@ at startup and refuses to start if either fails.
 Out of scope for the daemon, and it should run as a different uid. The
 daemon's job ends at "the file is on disk"; anything that inspects, scans,
 moves, or publishes uploads is a separate process with its own privileges.
+
+Uploads are created `0660`, owned by the daemon's user and group (`tnfs`), so
+the intended arrangement is a `2770` drop box and a human or a drain job in
+group `tnfs`:
+
+```
+chown tnfs:tnfs /srv/tnfs/incoming
+chmod 2770      /srv/tnfs/incoming   # setgid: uploads inherit group tnfs
+usermod -aG tnfs <operator>
+```
+
+That group can read, edit, and move what landed without `sudo`. None of it is
+load-bearing for the policy — it only decides who on the host can drain the
+directory, never what a TNFS client can do, which stays exactly "create a file
+that does not exist yet".
 
 Since the daemon deliberately cannot list the drop box for anyone, its upload
 log is the operator's visibility into it: source IP, requested name, final

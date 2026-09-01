@@ -33,7 +33,7 @@ struct server srv;
 #define DEFAULT_MAX_FILES   256ull
 #define DEFAULT_MAX_TOTAL   (1024ull * 1024 * 1024)
 
-#define UNPRIV_USER "nobody"
+#define UNPRIV_USER "tnfs"
 
 static int notify_fd = -1;
 
@@ -226,7 +226,7 @@ static int probe_zones(void)
     if (dropbox_make_temp(tmp, sizeof tmp) != 0)
         return -1;
     fd = openat(srv.inc_fd, tmp,
-                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0660);
     if (fd < 0) {
         log_err("cannot create files in %s/incoming: %s",
                 srv.root_path, strerror(errno));
@@ -314,6 +314,13 @@ int main(int argc, char **argv)
 {
     if (parse_args(argc, argv) != 0)
         return 2;
+
+    /* Uploads are created 0660 so that the group draining the drop box can
+     * read them (DESIGN.md 6). The inherited umask would otherwise decide
+     * that silently - systemd's default 0022 strips the group-write bit - so
+     * it is set here rather than left to the environment. 0002 keeps the
+     * world bits off whatever mode a create asks for. */
+    umask(0002);
 
     dropbox_init();
     notify_connect();
