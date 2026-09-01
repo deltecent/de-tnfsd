@@ -73,6 +73,41 @@ The daemon needs exactly two things from the filesystem: it must be able to
 read `pub`, and create files in `incoming`. It checks both by attempting them
 at startup and refuses to start if either fails.
 
+## Filling pub
+
+The startup check covers `pub` itself, not what you later put in it, and this
+is the one place where the filesystem can make the daemon look broken. The
+daemon serves `pub` as its own uid, so a file it cannot open is *listed* and
+then fails on read with `EACCES` — the client sees a name it cannot fetch,
+which reads as a server bug rather than a permissions problem. `READ` is the
+only capability involved; the daemon never needs write, so who owns the file
+does not matter, only whether `tnfs` can read it.
+
+The arrangement that makes this automatic is a setgid `pub` owned by the
+daemon's group:
+
+```
+chown -R tnfs:tnfs /srv/tnfs/pub
+find /srv/tnfs/pub -type d -exec chmod 2775 {} +
+find /srv/tnfs/pub -type f -exec chmod 0664 {} +
+usermod -aG tnfs <operator>
+```
+
+Setgid matters more here than on the flat drop box, because `pub` is
+recursive: it makes each subdirectory you create inherit group `tnfs` instead
+of your own primary group, so the whole tree stays readable as you extend it.
+Content can then be owned by whoever maintains it — a `patrick:tnfs 2775`
+subdirectory under a `tnfs:tnfs 2775` `pub` serves fine.
+
+What is left is your umask, which decides the mode of every file you add.
+`002` or `022` both work; `077` produces `0600` files that the daemon cannot
+read, and the symptom is the listed-but-unfetchable file above. Most
+distributions that give each user a private group already default to `002`
+(via `pam_umask` and `USERGROUPS_ENAB`), so usually there is nothing to do —
+but it is worth checking with `umask` before blaming the daemon.
+`chmod -R g+rX /srv/tnfs/pub` repairs a tree that was populated under a
+restrictive one.
+
 ## Draining the drop box
 
 Out of scope for the daemon, and it should run as a different uid. The
