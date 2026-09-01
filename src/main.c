@@ -273,6 +273,146 @@ static int drop_privileges(void)
     return 0;
 }
 
+/* Step 3, second half. Landlock (Linux 5.13+) says what the *filesystem*
+ * may hand back: read under pub, create/write/remove under incoming, and
+ * nothing else, anywhere. Unlike the chroot above it needs no privilege, so
+ * it applies whether or not the daemon was started as root - which matters,
+ * because a deployment that adds User= to the unit file skips the chroot
+ * entirely and would otherwise be confined by nothing but the dirfd walk.
+ *
+ * Like the chroot this is defence in depth: the served namespace is confined
+ * structurally by resolve(), and no request can reach a syscall these rules
+ * would have to refuse. It bounds what a bug elsewhere in the daemon can
+ * touch, not what a client can ask for.
+ *
+ * Applied after the drop and before probe_zones(), so the startup probe is
+ * also the proof that the ruleset permits what serving needs. Descriptors
+ * opened before this point keep working - Landlock checks the open, not the
+ * fd - which is what lets the zone dirfds, the listening sockets, the notify
+ * socket and dropbox's /dev/urandom fd outlive a ruleset that would refuse
+ * to open any of them again.
+ */
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<linux/landlock.h>)
+#define DE_LANDLOCK 1
+#endif
+#endif
+
+#ifdef DE_LANDLOCK
+#include <linux/landlock.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+
+/* No glibc wrappers exist for these; the numbers are the same on every
+ * architecture, having been added after the syscall tables were unified. */
+#ifndef __NR_landlock_create_ruleset
+#define __NR_landlock_create_ruleset 444
+#define __NR_landlock_add_rule       445
+#define __NR_landlock_restrict_self  446
+#endif
+
+/* Everything Landlock ABI 1 can govern. Handling a right the daemon never
+ * needs is the point: what is handled and not granted is denied. */
+#define FS_HANDLED_ABI1 ( \
+    LANDLOCK_ACCESS_FS_EXECUTE     | LANDLOCK_ACCESS_FS_WRITE_FILE | \
+    LANDLOCK_ACCESS_FS_READ_FILE   | LANDLOCK_ACCESS_FS_READ_DIR   | \
+    LANDLOCK_ACCESS_FS_REMOVE_DIR  | LANDLOCK_ACCESS_FS_REMOVE_FILE | \
+    LANDLOCK_ACCESS_FS_MAKE_CHAR   | LANDLOCK_ACCESS_FS_MAKE_DIR   | \
+    LANDLOCK_ACCESS_FS_MAKE_REG    | LANDLOCK_ACCESS_FS_MAKE_SOCK  | \
+    LANDLOCK_ACCESS_FS_MAKE_FIFO   | LANDLOCK_ACCESS_FS_MAKE_BLOCK | \
+    LANDLOCK_ACCESS_FS_MAKE_SYM)
+
+static int landlock_grant(int ruleset_fd, int parent_fd, uint64_t allowed)
+{
+    struct landlock_path_beneath_attr rule;
+
+    memset(&rule, 0, sizeof rule);
+    rule.allowed_access = allowed;
+    rule.parent_fd = parent_fd;
+    return (int)syscall(__NR_landlock_add_rule, ruleset_fd,
+                        LANDLOCK_RULE_PATH_BENEATH, &rule, 0U);
+}
+
+static int confine(void)
+{
+    struct landlock_ruleset_attr attr;
+    int abi, ruleset_fd, rc = -1;
+
+    abi = (int)syscall(__NR_landlock_create_ruleset, NULL, 0U,
+                       LANDLOCK_CREATE_RULESET_VERSION);
+    if (abi < 1) {
+        log_info("landlock unavailable (%s); confinement is the dirfd walk "
+                 "alone", strerror(errno));
+        return 0;
+    }
+
+    memset(&attr, 0, sizeof attr);
+    attr.handled_access_fs = FS_HANDLED_ABI1;
+#ifdef LANDLOCK_ACCESS_FS_REFER
+    if (abi >= 2)                       /* deny cross-directory link/rename */
+        attr.handled_access_fs |= LANDLOCK_ACCESS_FS_REFER;
+#endif
+#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
+    if (abi >= 3)                       /* nothing here truncates anything  */
+        attr.handled_access_fs |= LANDLOCK_ACCESS_FS_TRUNCATE;
+#endif
+#ifdef LANDLOCK_ACCESS_FS_IOCTL_DEV
+    if (abi >= 5)
+        attr.handled_access_fs |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
+#endif
+
+    ruleset_fd = (int)syscall(__NR_landlock_create_ruleset, &attr, sizeof attr,
+                              0U);
+    if (ruleset_fd < 0) {
+        log_err("landlock_create_ruleset: %s", strerror(errno));
+        return -1;
+    }
+
+    /* The two zones, each granted exactly its capability set (DESIGN.md 4):
+     * pub reads, incoming creates. The link that finalizes an upload stays
+     * inside incoming, so it needs MAKE_REG and not REFER. */
+    if (landlock_grant(ruleset_fd, srv.pub_fd,
+                       LANDLOCK_ACCESS_FS_READ_FILE |
+                       LANDLOCK_ACCESS_FS_READ_DIR) != 0) {
+        log_err("landlock rule for pub: %s", strerror(errno));
+        goto out;
+    }
+    if (srv.inc_fd >= 0 &&
+        landlock_grant(ruleset_fd, srv.inc_fd,
+                       LANDLOCK_ACCESS_FS_READ_DIR |
+                       LANDLOCK_ACCESS_FS_WRITE_FILE |
+                       LANDLOCK_ACCESS_FS_MAKE_REG |
+                       LANDLOCK_ACCESS_FS_REMOVE_FILE) != 0) {
+        log_err("landlock rule for incoming: %s", strerror(errno));
+        goto out;
+    }
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        log_err("prctl(NO_NEW_PRIVS): %s", strerror(errno));
+        goto out;
+    }
+    if (syscall(__NR_landlock_restrict_self, ruleset_fd, 0U) != 0) {
+        log_err("landlock_restrict_self: %s", strerror(errno));
+        goto out;
+    }
+
+    log_info("landlock abi %d: pub read-only, incoming create-only, "
+             "no other path reachable", abi);
+    rc = 0;
+out:
+    close(ruleset_fd);
+    return rc;
+}
+
+#else /* not Linux, or headers without Landlock */
+
+static int confine(void)
+{
+    return 0;
+}
+
+#endif
+
 /* sd_notify without libsystemd: the protocol is one datagram to the socket
  * named in $NOTIFY_SOCKET. The socket is connected before the chroot; when
  * the variable is unset, everything here is a no-op, which is what makes the
@@ -330,6 +470,8 @@ int main(int argc, char **argv)
     if (open_zones() != 0)
         return 1;
     if (drop_privileges() != 0)
+        return 1;
+    if (confine() != 0)
         return 1;
     if (probe_zones() != 0)
         return 1;

@@ -56,6 +56,11 @@ the shell case work unchanged.
 
 Started as root, the daemon chroots to `<root>` and drops to `tnfs` after
 opening its directory fds — which is why the unit must not set `User=`.
+On Linux it then applies a Landlock ruleset — read under `pub`, create under
+`incoming`, nothing else — which needs no privilege and so applies whatever
+uid it was started as. Both are defence in depth: confinement of the served
+namespace comes from the dirfd walk, and the daemon runs unchanged on a
+kernel without Landlock.
 
 ## Permissions
 

@@ -107,7 +107,10 @@ its checks by row number. Check any proposed change against that table.
 - **Size limits are checked against apparent size** (highest offset written +
   length), so a seek cannot buy extra room.
 - **POSIX only.** No `WIN32` ifdefs, no portability layer, no backend seam.
-  This is a hard constraint (§3), not a default.
+  This is a hard constraint (§3), not a default. The one `__linux__` ifdef is
+  `confine()` in `main.c` — the Landlock ruleset of §7 step 3. It is a
+  hardening step, not a backend: it compiles away to `return 0`, and the
+  daemon behaves identically without it.
 
 ## Deliberately absent — do not reintroduce
 
