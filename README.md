@@ -28,6 +28,28 @@ make debug              # rebuild with ASan and UBSan
 make install            # PREFIX=/usr/local
 ```
 
+## Installing
+
+`install.sh` does the whole first-time setup on Linux: build, create the
+`tnfs` system user, make `<root>/pub` and `<root>/incoming` with the modes
+below, install the binary, and install and start the unit.
+
+```
+sudo ./install.sh                                  # /usr/local, /srv/tnfs
+sudo ./install.sh --prefix /opt/tnfs --root /data/tnfs --port 16385
+./install.sh --dry-run                             # print, change nothing
+```
+
+`--no-start` installs the unit without starting it, `--no-service` skips
+systemd entirely, `--check` runs the test suites before installing. Re-running
+is safe: an existing user or directory is kept, and a unit file that differs
+from what the script would write is backed up first. `--dry-run` needs no
+privileges and prints every command it would run, including the rewritten
+unit.
+
+Everything it does is in `make install` plus a `useradd` and four `chmod`s;
+elsewhere than Linux, do those by hand.
+
 ## Running
 
 ```
