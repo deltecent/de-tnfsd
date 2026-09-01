@@ -1,0 +1,24 @@
+[Unit]
+Description=de-tnfsd TNFS Server
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/sbin/de-tnfsd /srv/tnfs
+Restart=on-failure
+
+# The daemon drops privileges and confines itself after opening its
+# directory fds. Do NOT add User= -- that would leave it without the
+# privileges the confinement step needs.
+
+ReadOnlyPaths=/srv/tnfs/pub
+ReadWritePaths=/srv/tnfs/incoming
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
