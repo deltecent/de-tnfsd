@@ -453,8 +453,19 @@ afterwards:
 1. Parse config, bind sockets.
 2. `open()` the root, `pub`, and `incoming` directory fds; run the §2 layout
    checks against them.
-3. Drop privileges and confine (the existing `chroot` path; on Linux, Landlock
-   or a seccomp filter is a cheap addition here).
+3. Drop privileges and confine. Started as root the daemon `chroot`s to
+   `<root>` and drops to `tnfs`; then, on Linux, it applies a Landlock
+   ruleset granting read under `pub` and create/write/remove under
+   `incoming` and nothing else anywhere. Landlock needs no privilege, so it
+   is applied unconditionally, after the drop — a deployment that runs the
+   daemon as an unprivileged user from the start skips the chroot but is
+   still confined. It handles every access right the running ABI offers and
+   grants only those two sets, so the kernel refuses what the daemon has no
+   business doing (including reading back out of the drop box). Where
+   Landlock is unavailable — an older kernel, a non-Linux system — the
+   daemon logs that and serves; nothing about the two-zone invariant depends
+   on it. Descriptors opened in steps 1–2 keep working, since Landlock
+   checks the open and not the fd.
 4. Serve. From this point the daemon never resolves an absolute path again —
    every operation is relative to a dirfd opened in step 2.
 
@@ -512,8 +523,8 @@ ExecStart=/usr/local/sbin/de-tnfsd /srv/tnfs
 Restart=on-failure
 
 # The daemon drops privileges and confines itself after opening its
-# directory fds. Do NOT add User= -- that would leave it without the
-# privileges the confinement step needs.
+# directory fds. Do NOT add User= -- the Landlock confinement applies
+# either way, but the chroot and the uid drop need to start as root.
 
 ReadOnlyPaths=/srv/tnfs/pub
 ReadWritePaths=/srv/tnfs/incoming
