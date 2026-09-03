@@ -127,7 +127,16 @@ int session_alloc_dir(struct session *s)
 
 int session_alloc_file(struct session *s)
 {
-    for (int i = 0; i < MAX_FILE_HANDLES; i++)
+    /* Handle 0 is never handed out. At least one real FujiNet client
+     * (FujiNetWIFI/fujinet-firmware's NetworkProtocolTNFS::close_file_handle,
+     * shared by fujinet-pc and the ESP32 build) treats a handle value of 0 as
+     * "nothing to close" and silently skips sending CLOSE for it -- so the
+     * first file opened in a session, if it lands on handle 0, is never
+     * finalized: the upload sits in the drop box under its temp name until
+     * the session ends, then gets reaped as cancelled. Confirmed live against
+     * a real client. Starting at 1 costs one permanently-idle slot out of
+     * MAX_FILE_HANDLES and sidesteps the client bug entirely. */
+    for (int i = 1; i < MAX_FILE_HANDLES; i++)
         if (!s->files[i].in_use) {
             memset(&s->files[i], 0, sizeof s->files[i]);
             s->files[i].in_use = 1;
