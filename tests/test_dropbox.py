@@ -238,11 +238,18 @@ def main(transport="udp"):
                     "bad upload name %r refused" % bad[:16],
                     "(got %s)" % t.sname(status))
 
-        # Flags that only make sense against an existing file.
-        for label, flags in (("O_TRUNC", t.O_WRONLY | t.O_CREAT | t.O_TRUNC),
-                             ("O_APPEND", t.O_WRONLY | t.O_CREAT | t.O_APPEND),
+        # O_TRUNC is accepted (real FujiNet clients always send it on a write
+        # open, existing target or not -- O_EXCL is forced on regardless, so
+        # it is a no-op here); O_APPEND and no-O_CREAT still make no sense
+        # against a file that is always freshly created and are refused.
+        status, handle = c.open("/incoming/flagprobe.bin", t.O_WRONLY | t.O_CREAT | t.O_TRUNC)
+        r.check_status(status, t.OK, "upload with O_TRUNC")
+        if status == t.OK:
+            c.close_file(handle)
+
+        for label, flags in (("O_APPEND", t.O_WRONLY | t.O_CREAT | t.O_APPEND),
                              ("no O_CREAT", t.O_WRONLY)):
-            status, _ = c.open("/incoming/flagprobe.bin", flags)
+            status, _ = c.open("/incoming/flagprobe2.bin", flags)
             r.check_status(status, t.EACCES, "upload with %s" % label)
 
         c.close()
