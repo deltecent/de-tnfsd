@@ -570,8 +570,15 @@ static size_t open_in_dropbox(struct req *q, struct resolved *r, uint16_t flags)
         return reply_status(q, TNFS_EACCES);
     if (!(flags & TNFS_O_CREAT))
         return reply_status(q, TNFS_EACCES);
-    /* Both only make sense against a file that already exists. */
-    if (flags & (TNFS_O_TRUNC | TNFS_O_APPEND))
+    /* O_APPEND only makes sense against a file that already exists, which a
+     * drop-box upload never is. O_TRUNC is accepted rather than refused: real
+     * FujiNet clients (fujinet-pc and the ESP32 firmware's NetworkProtocolTNFS)
+     * unconditionally OR O_TRUNC into every write-mode open regardless of
+     * whether the target exists, so refusing it makes every upload from an
+     * actual FujiNet client fail. It changes nothing here either way -- O_EXCL
+     * is forced on below regardless of what the client asked for, so the real
+     * open always creates a fresh file and O_TRUNC is a no-op on it. */
+    if (flags & TNFS_O_APPEND)
         return reply_status(q, TNFS_EACCES);
 
     /* Name syntax is a property of the request, not of the directory, so it
