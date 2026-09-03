@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #define MAX_COMPONENTS 32
@@ -20,11 +21,17 @@ unsigned zone_caps(enum zone z)
     return 0;
 }
 
+/* Case-insensitive: 8-bit CP/M clients uppercase an entire command line,
+ * FujiNet's own path included, before a client program ever sees it -- so a
+ * TNFS path arrives as /PUB or /INCOMING with no way for the client side to
+ * send lowercase. Leaf names inside a zone are matched by the filesystem and
+ * stay whatever case they are on disk; only the two fixed top-level zone
+ * names are folded here. */
 int zone_from_name(const char *name)
 {
-    if (strcmp(name, "pub") == 0)
+    if (strcasecmp(name, "pub") == 0)
         return ZONE_PUB;
-    if (strcmp(name, "incoming") == 0)
+    if (strcasecmp(name, "incoming") == 0)
         return ZONE_INCOMING;
     return -1;
 }
