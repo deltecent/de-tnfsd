@@ -92,9 +92,17 @@ overwrite anything in it, or delete anything from it: those operations are
 refused by the capability table before any syscall is attempted. Making `pub`
 world-writable does not make it writable over TNFS either.
 
-Tight modes (`0755` on `pub`, `0733` on `incoming`) are a reasonable habit and
-cost nothing, but nothing here depends on them, and the drop-box test suite
-runs with the directory world-writable to keep that honest.
+`install.sh` creates `pub` `2775` and `incoming` `2770`, both owned
+`tnfs:tnfs`. Those modes are chosen for the humans on the host rather than for
+the policy: setgid, so that uploads inherit group `tnfs` for whoever drains
+them and so `pub` stays group-readable as you extend it. Both are explained
+under "Filling pub" and "Draining the drop box" below.
+
+Stricter modes work just as well — including the classic anonymous-ftpd `0755`
+on `pub` and `0733` on `incoming`, which costs only the group drain, since
+group members can then no longer read what they are draining. Nothing here
+depends on any of it, and the drop-box test suite runs with the directory
+world-writable to keep that honest.
 
 The daemon needs exactly two things from the filesystem: it must be able to
 read `pub`, and create files in `incoming`. It checks both by attempting them
