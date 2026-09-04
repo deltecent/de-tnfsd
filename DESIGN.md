@@ -504,10 +504,13 @@ has no opinion about modes — see §2: the permission policy is the daemon's,
 not the filesystem's, and a world-writable drop box changes nothing a client
 can do.
 
-An operator who wants tight modes anyway can have them; `0755` on `pub` and
-`0733` on `incoming` (the classic ftpd arrangement) work fine and are a
-reasonable habit. They are just not load-bearing here, and the daemon will not
-warn about, complain about, or "fix" whatever it finds.
+An operator who wants different modes can have them, and the daemon will not
+warn about, complain about, or "fix" whatever it finds. `install.sh` ships
+`2775` on `pub` and `2770` on `incoming`: setgid, so uploads inherit group
+`tnfs` for whoever drains them and `pub` stays group-readable as it grows.
+The classic ftpd `0755`/`0733` works exactly as well from the daemon's side,
+at the cost of that group drain. None of it is load-bearing — and per §2, a
+`0733` that looks like it is enforcing something here is not.
 
 ### Running from a shell
 
