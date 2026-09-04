@@ -205,7 +205,7 @@ instead of global buffers, one authorization point instead of four — which is
 most of what the memory-safety fixes on the current branch were doing by hand.
 
 **POSIX only. Windows is not supported and will not be.** The resolver is
-built directly on `openat` with `O_NOFOLLOW`, `fstatat`, `renameat` and
+built directly on `openat` with `O_NOFOLLOW`, `fstatat`, `linkat` and
 `unlinkat` — POSIX.1-2008, present on Linux, the BSDs, and macOS. Windows has
 no equivalent, and the only way to support it would be to reimplement
 confinement on canonicalized path strings, which is the weaker technique this
@@ -337,12 +337,21 @@ creates sparse files, so the size cap in §6 is enforced against the file's
 apparent size, not the bytes actually transferred.
 
 **Finalization.** A file is created under a unique temporary name
-(`.tmp-<random>`), and `CLOSE` renames it to the client's requested name with
-`renameat`. Two things fall out: a partially uploaded file never appears
-complete to whatever drains the directory, and a session that dies mid-upload
-leaves a dotfile that a janitor can sweep on age. If the target name was taken
-in the meantime, the rename fails and the temp file is unlinked — the client
-sees `EACCES`, consistent with every other refusal in that zone.
+(`.tmp-<random>`), and `CLOSE` publishes it under the client's requested name
+with `linkat`, then unlinks the temporary name. Two things fall out: a
+partially uploaded file never appears complete to whatever drains the
+directory, and a session that dies mid-upload leaves a dotfile that a janitor
+can sweep on age.
+
+`linkat` rather than `renameat`, and this is not a detail. The existence
+check at `OPEN` time cannot settle whether the name is free at `CLOSE` time —
+anything may have appeared under it while the upload was in flight — and
+`renameat` would silently replace whatever it found, which is the one thing
+this zone must never do. `linkat` refuses with `EEXIST` instead, and the
+temporary file is then unlinked, so nothing already in the drop box is ever
+destroyed by an upload. The `EEXIST` itself never reaches the client: like
+every other refusal in the zone it is reported as `EACCES`, which is what
+rows 5 and 6 of §5 require.
 
 ### Device
 
