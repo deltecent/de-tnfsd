@@ -291,8 +291,16 @@ which combinations are safe, the daemon does not implement the operation.
   by default and the downgrade costs nothing. `O_RDONLY` → `EACCES`.
 - `O_CREAT` is required. `O_EXCL` is forced on regardless of what the client
   asked for; this is what makes overwrite impossible.
-- `O_TRUNC` and `O_APPEND` are refused — both only make sense against a file
-  that already exists.
+- `O_APPEND` is refused: it only makes sense against a file that already
+  exists, which an upload never is.
+- `O_TRUNC` is **accepted and ignored**. It is meaningless here for the same
+  reason `O_APPEND` is, but refusing it costs real compatibility: FujiNet
+  clients (the ESP32 firmware and `fujinet-pc` alike) OR it into every
+  write-mode open unconditionally, so a refusal rejects every upload they
+  attempt. Accepting it is safe because the client's flags are never passed
+  through — the real `openat()` is built from a fixed set with `O_EXCL` and
+  `O_CREAT` forced on, so the file is always newly created and there is
+  nothing for a truncation to do.
 - `O_NOFOLLOW` is forced on, so a symlink planted in the drop box by some
   other means cannot be used to redirect a write.
 - The client's mode argument is ignored. Files are created `0660` as a
@@ -310,6 +318,17 @@ which combinations are safe, the daemon does not implement the operation.
   the property the design actually rests on is that an uploaded file can never
   be read back, and knowing a name is taken is not much of a prize. It costs
   nothing to withhold, so it is withheld.
+
+**File handle 0 is never handed out.** Handles are indices into a small
+per-session table, and nothing in the protocol reserves a value — but at
+least one real client (`NetworkProtocolTNFS::close_file_handle()` in
+FujiNet's firmware, shared with `fujinet-pc`) tests `if (fd != 0)` before
+sending `CLOSE`, treating a handle of `0` as "nothing open". The first file
+such a client opens is then never closed on the wire: an upload finalizes
+only on `CLOSE`, so it sits under its temp name until the session ends and is
+swept as cancelled, while the client's own log shows every step succeeding.
+Allocation therefore starts at 1. It costs one permanently idle slot of
+`MAX_FILE_HANDLES` and nothing else.
 
 `SEEK` on a drop-box descriptor is allowed. The client can only rewrite bytes
 of the file it created moments ago in the same session, which tells it

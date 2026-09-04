@@ -97,6 +97,18 @@ def main(transport="udp"):
             status, _ = c.open("/pub/newfile.txt", flags)
             r.check_status(status, t.EROFS, "OPEN new %s" % label)
 
+        # Handle 0 is never handed out. A client that reads a file handle of
+        # 0 as "nothing open" skips CLOSE for it, and in the drop box a
+        # skipped CLOSE means an upload that never finalizes (DESIGN.md 4).
+        cf = daemon.client("/")
+        status, handle = cf.open("/pub/readme.txt", t.O_RDONLY)
+        r.check(status == t.OK and handle != 0,
+                "the first file handle of a session is never 0",
+                "(got %s handle %r)" % (t.sname(status), handle))
+        if status == t.OK:
+            cf.close_file(handle)
+        cf.close()
+
         # A read descriptor cannot be turned into a write descriptor.
         status, handle = c.open("/pub/readme.txt", t.O_RDONLY)
         r.check_status(status, t.OK, "OPEN read-only succeeds")
