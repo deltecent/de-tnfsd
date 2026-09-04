@@ -98,6 +98,11 @@ class Client:
         msg = struct.pack("<HBB", 0, self.seq, MOUNT) + payload
         self._send(msg)
         reply = self.sock.recv(2048)
+        # Same guard as request(). On TCP an empty read means the peer closed
+        # without answering, which is a protocol error to be retried or
+        # reported -- not a struct.error from unpacking a short buffer.
+        if len(reply) < 5:
+            raise ProtocolError("short MOUNT reply: %r" % reply)
         rsid, rseq, rcmd = struct.unpack("<HBB", reply[:4])
         status = reply[4]
         if status == OK:
@@ -248,8 +253,8 @@ class Daemon:
                 if c.mount_raw("/")[0] == OK:
                     c.request(UMOUNT)
                     return
-            except (socket.timeout, OSError):
-                pass
+            except (socket.timeout, OSError, ProtocolError):
+                pass                     # not serving yet, or not ours
             finally:
                 c.close()
             time.sleep(0.1)
@@ -274,11 +279,31 @@ class Daemon:
 
 
 def _free_port():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind((HOST, 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    """A port the daemon can take for both of its sockets.
+
+    The daemon binds one dual-stack AF_INET6 socket per transport, so a port
+    that happens to be free for UDP says nothing about TCP. Probing with a
+    single AF_INET datagram socket -- as this used to -- can hand back a port
+    something else already holds for TCP, and the symptom is a client that
+    connects to a stranger and is closed on without a reply."""
+    for _ in range(20):
+        tcp = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        tcp.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        try:
+            tcp.bind(("::", 0))
+            port = tcp.getsockname()[1]
+            udp = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            udp.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            try:
+                udp.bind(("::", port))   # the daemon needs both, on one port
+            finally:
+                udp.close()
+            return port
+        except OSError:
+            continue                     # that port is spoken for; try again
+        finally:
+            tcp.close()
+    raise RuntimeError("no port free for both TCP and UDP")
 
 
 class Results:
