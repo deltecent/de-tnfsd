@@ -520,8 +520,10 @@ static size_t h_stat(struct req *q)
     return reply_ok(q, len);
 }
 
-static size_t open_in_pub(struct req *q, struct resolved *r, uint16_t flags)
+static size_t open_in_pub(struct req *q, struct resolved *r, uint16_t flags,
+                          const char *path)
 {
+    struct file_slot *f;
     struct stat st;
     int fd, handle;
 
@@ -546,11 +548,17 @@ static size_t open_in_pub(struct req *q, struct resolved *r, uint16_t flags)
         close(fd);
         return reply_status(q, TNFS_EMFILE);
     }
-    q->s->files[handle].fd = fd;
-    q->s->files[handle].caps = CAP_READ;
-    q->s->files[handle].zone = ZONE_PUB;
-    q->s->files[handle].opened = time(NULL);
-    q->s->files[handle].last_active = q->s->files[handle].opened;
+    f = &q->s->files[handle];
+    f->fd = fd;
+    f->caps = CAP_READ;
+    f->zone = ZONE_PUB;
+    f->opened = time(NULL);
+    f->last_active = f->opened;
+    f->size = (uint64_t)st.st_size;
+    snprintf(f->path, sizeof f->path, "%s", path);
+
+    log_info("download start ip=%s name=%s size=%llu",
+             q->s->ip, f->path, (unsigned long long)f->size);
 
     body(q)[0] = (uint8_t)handle;
     return reply_ok(q, 1);
@@ -666,7 +674,7 @@ static size_t h_open(struct req *q)
     if (r.zone == ZONE_INCOMING)
         len = open_in_dropbox(q, &r, flags);
     else
-        len = open_in_pub(q, &r, flags);
+        len = open_in_pub(q, &r, flags, path);
     resolved_release(&r);
     return len;
 }
@@ -694,11 +702,25 @@ static size_t h_read(struct req *q)
         want = TNFS_MAX_PAYLOAD;
 
     n = read(f->fd, body(q) + 2, want);
-    if (n < 0)
-        return reply_status(q, (uint8_t)tnfs_errno(errno));
-    if (n == 0)
+    if (n < 0) {
+        int e = errno;
+        /* Logged once: a client is free to retry a failing read forever, and
+         * one line per attempt would say nothing new. CLOSE reports the
+         * download as failed. */
+        if (!f->read_failed) {
+            f->read_failed = 1;
+            log_info("download error ip=%s name=%s bytes=%llu err=%s",
+                     q->s->ip, f->path, (unsigned long long)f->nread,
+                     strerror(e));
+        }
+        return reply_status(q, (uint8_t)tnfs_errno(e));
+    }
+    if (n == 0) {
+        f->hit_eof = 1;
         return reply_status(q, TNFS_EOF);
+    }
 
+    f->nread += (uint64_t)n;
     f->last_active = time(NULL);
     put_u16(body(q), (uint16_t)n);
     return reply_ok(q, 2 + (size_t)n);

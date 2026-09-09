@@ -529,6 +529,24 @@ shutdown, non-zero with a specific message on stderr for a startup failure
 (bad arguments, missing `pub` or `incoming`, port in use, cannot drop
 privileges).
 
+Every line is `<timestamp> <level> <event> key=value ...`, and the vocabulary
+is small: `mount`, `umount`, `session expired`, the upload lines §6 requires
+(`upload start`, then exactly one of `upload ok`, `upload cancelled`, `upload
+aborted`, `upload rename failed`), and the same shape for reads — `download
+start`, then exactly one of `download ok`, `download incomplete`, or `download
+failed`, carrying bytes served, file size, and duration. Individual `READ`s
+are not logged: the payload is 512 bytes, so that would be a line per packet.
+
+Downloads are logged for operability, not for the invariant — `pub` is public
+and read-only, and nothing about it needs an audit trail. What an operator
+needs is to tell a large file still streaming from a client that hung, which
+takes a closing line to pair with the opening one. That line is emitted
+wherever the descriptor is released — an explicit `CLOSE`, a dropped
+connection, an idle session reaped — so a `download start` is never left
+dangling. `ok` means the client saw the whole file: it either read to `EOF` or
+read at least the file's length, since a client that takes the size from
+`STAT` stops exactly on the end and never reads past it.
+
 This is the same binary and the same arguments used under systemd. There is no
 `-D`/`--daemon` flag and no separate service mode, because a foreground
 process that logs to stderr is both what a supervisor wants and what someone

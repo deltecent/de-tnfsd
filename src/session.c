@@ -190,6 +190,22 @@ int session_close_file(struct session *s, int handle, int commit)
                      s->ip, f->target, (unsigned long long)f->apparent,
                      (long long)(time(NULL) - f->opened));
         }
+    } else if (f->zone == ZONE_PUB) {
+        /* Every "download start" gets exactly one closing line, whether the
+         * client closed the handle, dropped the connection, or idled out: an
+         * unclosed download arrives here via session_close().
+         *
+         * "ok" means the client saw the whole file. Either signal will do:
+         * some clients read until EOF, others take the size from STAT and
+         * stop exactly on it without ever reading past the end. */
+        const char *verb = f->read_failed ? "failed"
+                         : (f->hit_eof || f->nread >= f->size) ? "ok"
+                         : "incomplete";
+
+        log_info("download %s ip=%s name=%s bytes=%llu size=%llu duration=%llds",
+                 verb, s->ip, f->path, (unsigned long long)f->nread,
+                 (unsigned long long)f->size,
+                 (long long)(time(NULL) - f->opened));
     }
 
     memset(f, 0, sizeof *f);

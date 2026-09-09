@@ -141,8 +141,20 @@ def main(transport="udp"):
         r.check_status(cp.unlink("readme.txt"), t.EROFS, "UNLINK on a /pub mount")
         cp.close()
 
+        # Reads are logged the way uploads are: one start line, one closing
+        # line per descriptor, wherever the descriptor is released
+        # (DESIGN.md 7). read_all() above read the file to EOF and closed it;
+        # the handle-0 client opened it and closed without reading a byte.
+        log = daemon.stop()
+        r.check("download start ip=" in log and
+                "name=/pub/readme.txt size=15" in log,
+                "a download logs a start line with the path and size")
+        r.check("download ok ip=" in log and "bytes=15 size=15" in log,
+                "a download read to the end logs ok")
+        r.check("download incomplete ip=" in log and "bytes=0 size=15" in log,
+                "a download closed early logs incomplete")
+
         # --no-incoming is the same server with the drop box gone.
-        daemon.stop()
         daemon = t.Daemon(binary, root, ["--no-incoming"], transport=transport)
         c = daemon.client("/")
         names = sorted(c.listdir("/"))

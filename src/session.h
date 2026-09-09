@@ -35,6 +35,15 @@ struct file_slot {
     uint64_t apparent;          /* highest offset written + length         */
     int      dead;              /* aborted; CLOSE reports close_status     */
     uint8_t  close_status;
+
+    /* Download bookkeeping. The path is the one the client asked for, not a
+     * reconstruction: pub is a tree, so the leaf alone would not say which
+     * file was served. */
+    char     path[TNFS_MAX_PATH + 1];
+    uint64_t size;              /* file size at OPEN                       */
+    uint64_t nread;             /* bytes handed to the client              */
+    int      read_failed;       /* a READ errored; logged once             */
+    int      hit_eof;           /* a READ ran off the end: client saw it all */
     time_t   opened;
     time_t   last_active;
 };
