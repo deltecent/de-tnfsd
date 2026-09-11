@@ -27,6 +27,18 @@ are left alone and the collision is logged.
 The script runs as root, on a cron schedule, and logs every action
 (`MOVED`/`RENAMED`/`SKIP ...`) to `/var/log/tnfs-case-fix.log`.
 
+## Conflicts
+
+Every name collision (an `incoming/` file that can't move because
+`for-review/` already has that name, or a lowercase name that can't be
+uppercased because the uppercase name already exists) is also recorded in
+`for-review/CONFLICTS.log`. Unlike the main log, this file is rebuilt each
+run to reflect only what is *currently* unresolved: a conflict keeps its
+original first-seen timestamp for as long as it persists, and drops out on
+its own the next run after it's resolved (rename/remove one side by hand).
+Check it any time you're in `for-review/` reviewing uploads — an empty file
+(just the header comment) means nothing is currently stuck.
+
 ## Install
 
 1. Set up `for-review/` first, per the main `README.md`.
