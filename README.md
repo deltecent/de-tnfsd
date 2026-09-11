@@ -168,6 +168,43 @@ Since the daemon deliberately cannot list the drop box for anyone, its upload
 log is the operator's visibility into it: source IP, requested name, final
 size, duration, and outcome, one line per upload.
 
+### A ready-made drain: `contrib/tnfs-case-fix/`
+
+The manual group drain above works, but a human still has to remember to
+look. `contrib/tnfs-case-fix/tnfs-case-fix.sh` automates the first step: run
+on a schedule (a `cron.d` entry ships alongside it), it moves every finished
+upload out of `incoming` into a plain `for-review` directory next to `pub`.
+
+`for-review` is not a TNFS zone, so no TNFS client can ever see it: the
+daemon only ever resolves a root-level path against the fixed zone names
+`pub`/`incoming` (`zone_from_name()` in `src/zone.c`), and answers a listing
+of the root with a hardcoded `pub`/`incoming` list (`dir_synthetic_root()`
+in `src/dir.c`). Any other name under the root, `for-review` included, is
+never looked up and never listed. The script only moves a name once it
+proves the upload is complete: the daemon finalizes an upload with
+`linkat()` from a hidden temp name to the final name before removing the
+temp name (`session_close_file()` in `src/session.c`), so a non-dot name
+appearing in `incoming` means the file is whole, never partial.
+
+Create `for-review` the same way as `pub`:
+
+```
+mkdir /srv/tnfs/for-review
+chown tnfs:tnfs /srv/tnfs/for-review
+chmod 2775      /srv/tnfs/for-review
+```
+
+`2775` gives every local user `r-x`: anyone can look inside `for-review`
+without `sudo`. Only `tnfs` (or its group, via the drain arrangement above)
+can write there, so moving a reviewed file into `pub`, or deleting one you
+do not want, needs `sudo` unless the operator is in group `tnfs` — a small,
+deliberate piece of friction on the one action that changes what is public.
+No group membership is required just to review.
+
+See `contrib/tnfs-case-fix/README.md` for install steps, and for the
+uppercase-name fix this same script applies under `pub`/`for-review` if
+your clients need it (CP/M and other 8-bit systems typically do).
+
 ## Tests
 
 Each test is a standalone script that spawns a real daemon and speaks TNFS to
