@@ -43,6 +43,7 @@ struct server {
     uint64_t max_files;
     uint64_t max_total_bytes;
     int      no_incoming;
+    int      ignore_case;   /* -i: fall back to ASCII case-insensitive match */
     enum serve_mode serve_mode;
     char     root_path[PATH_MAX];
 

@@ -3,9 +3,12 @@
 #include "server.h"
 #include "tnfs.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MAX_COMPONENTS 32
@@ -103,6 +106,45 @@ static int split_path(const char *path,
     return TNFS_OK;
 }
 
+/* Opt-in (-i) ASCII case-insensitive fallback. Only ever called after an exact
+ * match has already missed, so it never overrides an exact hit and costs
+ * nothing on the common path. It reads the directory the resolver is standing
+ * in via a fresh fd (fdopendir consumes it) and copies out the first entry that
+ * equals `want` under strcasecmp. Folding is ASCII-only and under the C locale
+ * by design: that is exactly what CP/M (uppercase) and DOS-style clients need,
+ * and it avoids inventing Unicode casing rules the filesystem never agreed to.
+ * On a case-preserving-but-insensitive host FS (macOS, Windows) an ambiguous
+ * match cannot arise; on a case-sensitive one two entries can differ only in
+ * case, and then the first found wins. Returns 0 and fills `real` on a match. */
+static int find_ci(int dirfd, const char *want, char *real, size_t realsz)
+{
+    int fd = openat(dirfd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *d;
+    struct dirent *de;
+    int found = -1;
+
+    if (fd < 0)
+        return -1;
+    d = fdopendir(fd);
+    if (d == NULL) {
+        close(fd);
+        return -1;
+    }
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        if (strcasecmp(de->d_name, want) == 0) {
+            if (strlen(de->d_name) < realsz) {
+                strcpy(real, de->d_name);
+                found = 0;
+            }
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
 int path_resolve(int mount_zone, const char *path, struct resolved *out)
 {
     char comps[MAX_COMPONENTS][TNFS_MAX_NAME + 1];
@@ -172,10 +214,17 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
     for (int i = start; i < ncomp - 1; i++) {
         int nfd = openat(dirfd, comps[i],
                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (nfd < 0 && errno == ENOENT && srv.ignore_case) {
+            char real[TNFS_MAX_NAME + 1];
+            if (find_ci(dirfd, comps[i], real, sizeof real) == 0)
+                nfd = openat(dirfd, real,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        }
         if (nfd < 0) {
+            int e = errno;
             if (owned)
                 close(dirfd);
-            return tnfs_errno(errno);
+            return tnfs_errno(e);
         }
         if (owned)
             close(dirfd);
@@ -188,6 +237,19 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
     if (ncomp - start >= 1) {
         strcpy(out->leaf, comps[ncomp - 1]);
         out->has_leaf = 1;
+        /* Resolve the leaf to its real casing only when it names a file that
+         * already exists: an exact hit is left alone, and a genuine miss keeps
+         * the requested name so a create still uses what the client asked for.
+         * That is what confines the fold to "find an existing name" and keeps
+         * every create -- including the drop box, which returned above -- exact. */
+        if (srv.ignore_case) {
+            struct stat st;
+            char real[TNFS_MAX_NAME + 1];
+            if (fstatat(dirfd, out->leaf, &st, AT_SYMLINK_NOFOLLOW) != 0 &&
+                errno == ENOENT &&
+                find_ci(dirfd, out->leaf, real, sizeof real) == 0)
+                strcpy(out->leaf, real);
+        }
     }
     return TNFS_OK;
 }

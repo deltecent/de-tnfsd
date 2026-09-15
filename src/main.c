@@ -42,7 +42,7 @@ static void usage(FILE *f)
     fprintf(f,
 "usage: de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]\n"
 "                [-q <max-total-bytes>] [--no-incoming]\n"
-"                [--serve-root | --serve-root-rw] [-v] <root>\n"
+"                [--serve-root | --serve-root-rw] [-i] [-v] <root>\n"
 "\n"
 "  -p  port to listen on                            (default %d)\n"
 "  -s  maximum size of one uploaded/written file    (default 16M, 0 = no limit)\n"
@@ -51,6 +51,7 @@ static void usage(FILE *f)
 "      --no-incoming    serve pub/ only; reject all writes\n"
 "      --serve-root     serve <root> itself read-only; no drop box\n"
 "      --serve-root-rw  serve <root> itself read/write (create + overwrite)\n"
+"  -i  match existing names case-insensitively (ASCII); create stays exact\n"
 "  -v  verbose logging\n"
 "\n"
 "Size arguments take an optional K, M or G suffix (powers of 1024).\n"
@@ -95,6 +96,11 @@ static int parse_args(int argc, char **argv)
         if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage(stdout);
             exit(0);
+        }
+        if (strcmp(a, "-i") == 0 || strcmp(a, "--ignore-case") == 0) {
+            srv.ignore_case = 1;
+            i++;
+            continue;
         }
         if (strcmp(a, "-v") == 0) {
             log_set_verbose(1);
@@ -554,6 +560,9 @@ int main(int argc, char **argv)
         return 1;
     if (open_zones() != 0)
         return 1;
+    if (srv.ignore_case)
+        log_info("-i: matching existing names case-insensitively (ASCII); "
+                 "create stays exact");
     if (drop_privileges() != 0)
         return 1;
     if (confine() != 0)

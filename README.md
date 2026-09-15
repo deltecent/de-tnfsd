@@ -27,7 +27,7 @@ There is no Windows build and there will not be one; see DESIGN.md §3.
 
 ```
 make                    # -> bin/de-tnfsd
-make check              # build and run the four test suites
+make check              # build and run the five test suites
 make debug              # rebuild with ASan and UBSan
 make install            # PREFIX=/usr/local
 ```
@@ -59,7 +59,7 @@ elsewhere than Linux, do those by hand.
 ```
 de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]
          [-q <max-total-bytes>] [--no-incoming]
-         [--serve-root | --serve-root-rw] [-v] <root>
+         [--serve-root | --serve-root-rw] [-i] [-v] <root>
 
   -p  port to listen on                            (default 16384)
   -s  maximum size of one uploaded/written file    (default 16M, 0 = no limit)
@@ -68,6 +68,7 @@ de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]
       --no-incoming     serve pub/ only; reject all writes
       --serve-root      serve <root> itself read-only; no drop box
       --serve-root-rw   serve <root> itself read/write (create + overwrite)
+  -i  match existing names case-insensitively (ASCII); create stays exact
   -v  verbose logging
 ```
 
@@ -117,6 +118,27 @@ These are a convenience for a quick local server. The default two-zone layout �
 with its guarantee that no path is ever both readable and writable — is
 unaffected and remains the mode you deploy. The daemon prints which mode it is
 in on its first log line.
+
+## Case-insensitive names
+
+Names are matched exactly by default. `-i` adds a fallback for clients that have
+no notion of case: CP/M upper-cases every filename, and macOS and Windows users
+expect `HELLO.TXT` and `hello.txt` to reach the same file. With `-i`, a lookup
+that misses exactly retries against the directory's real entries using ASCII
+case folding, so any casing of an existing name resolves to the file on disk.
+
+The fold is narrow on purpose:
+
+- It **only finds names that already exist**. A create keeps exactly the
+  spelling the client asked for, so uploads to the drop box stay
+  case-sensitive and two differently-cased names never collide there.
+- It changes nothing about confinement: it is a `readdir` of a directory the
+  resolver already holds open, still walked one component at a time with
+  `O_NOFOLLOW`, and `..` is still refused.
+- It is ASCII-only (the C locale), which is what CP/M and DOS-style clients
+  need; non-ASCII UTF-8 bytes are not folded.
+
+`-i` works in every mode — the two-zone server and both serve-root modes.
 
 ## Permissions
 
@@ -212,4 +234,5 @@ python3 tests/test_confinement.py bin/de-tnfsd   # nothing outside the root is r
 python3 tests/test_readonly.py    bin/de-tnfsd   # pub refuses every mutation
 python3 tests/test_dropbox.py     bin/de-tnfsd   # DESIGN.md 5, row by row
 python3 tests/test_serveroot.py   bin/de-tnfsd   # --serve-root / --serve-root-rw
+python3 tests/test_ignorecase.py  bin/de-tnfsd   # -i folds an existing name, only that
 ```

@@ -233,6 +233,39 @@ exists — which is exactly the property that keeps the drop box opaque.
 Handlers act through `openat`, `fstatat`, `unlinkat` and friends relative to
 the resolved directory fd. No handler ever builds an absolute path string.
 
+### Case-insensitive matching (`-i`), an opt-in fallback
+
+Names are matched exactly by default. `-i` adds a fallback for the clients that
+have no concept of case: CP/M upper-cases every filename, and users coming from
+macOS or Windows expect `HELLO.TXT` and `hello.txt` to name the same file. It
+is a *miss-path* addition and nothing more. Each `openat`/`fstatat` in the walk
+is tried with the requested spelling first; only when that returns `ENOENT`
+does the resolver read the directory it is standing in and, if exactly one
+entry matches under an ASCII `strcasecmp`, retry the `*at` call against that
+real on-disk name. An exact hit never triggers a scan, so the common path is
+untouched.
+
+The fold is deliberately narrow, and none of it moves the authorization
+boundary:
+
+- **It only ever finds a name that already exists.** The scan runs on an
+  `ENOENT`, so a genuine miss keeps the requested spelling and a *create* uses
+  exactly what the client asked for. Reads and an overwrite of an existing file
+  (in `--serve-root-rw`) fold; creation does not. The drop box, whose resolve
+  returns before this point, stays fully case-sensitive — two differently-cased
+  uploads never collide, and the "name already taken" check is still exact.
+- **Confinement is unchanged.** The scan is a `readdir` of the directory the
+  walk already holds open; the retry is the same `openat(dirfd, name,
+  O_NOFOLLOW)` against a name that came from that directory's own entries. No
+  path string is built, `..` and `.` are still rejected in the split before any
+  of this, and a symlink still fails the `O_NOFOLLOW` open.
+- **ASCII only, under the C locale.** That is exactly what CP/M and DOS-style
+  clients need; UTF-8 non-ASCII bytes are not folded, so the daemon never
+  invents Unicode casing rules the filesystem did not agree to. On a
+  case-insensitive host filesystem the ambiguous case cannot arise; on a
+  case-sensitive one two entries can differ only in case, and the first found
+  wins.
+
 ### Per-fd capabilities
 
 `OPEN` records the resolved capability set in the file-descriptor slot
@@ -665,7 +698,7 @@ that binds two sockets at startup, and it complicates the step ordering above.
 ```
 de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]
          [-q <max-total-bytes>] [--no-incoming]
-         [--serve-root | --serve-root-rw] <root>
+         [--serve-root | --serve-root-rw] [-i] <root>
 
   -p  port to listen on                            (default 16384)
   -s  maximum size of one uploaded/written file    (default 16M, 0 = no limit)
@@ -674,6 +707,7 @@ de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]
       --no-incoming     serve pub/ only; reject all writes
       --serve-root      serve <root> itself read-only; no drop box
       --serve-root-rw   serve <root> itself read/write (create + overwrite)
+  -i  match existing names case-insensitively (ASCII); create stays exact
 ```
 
 Size arguments accept a `K`, `M`, or `G` suffix (powers of 1024); a bare
@@ -687,9 +721,15 @@ bounds a written file instead of an upload). They are mutually exclusive. In
 these modes there is no layout to check, so the only startup requirement is
 that `<root>` be readable — and, for `--serve-root-rw`, writable.
 
+`-i` turns on the case-insensitive matching fallback of §3: an exact miss
+retries against a case-folded directory entry, for CP/M and desktop clients
+that have no notion of case. It resolves existing names only — a create keeps
+the requested spelling — so the drop box stays case-sensitive and the
+disjointness invariant is untouched. It applies in every mode.
+
 Otherwise: there is no `-r` selecting read-only for `pub`; read-only is the
-only mode `pub` has. There is no `-i`: the drop box is `<root>/incoming` or it
-does not exist. `--no-incoming` runs a pure read-only two-zone server, for
+only mode `pub` has. The drop box is `<root>/incoming` or it does not exist;
+its location is not configurable. `--no-incoming` runs a pure read-only two-zone server, for
 hosts that should not accept uploads at all — it disables the drop box while
 keeping the `pub`/`incoming` split, since `-n 0` means unlimited rather than
 zero files.

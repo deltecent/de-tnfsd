@@ -22,7 +22,7 @@ files themselves are off limits.
 
 ```
 make                    # -> bin/de-tnfsd
-make check              # build, then run all four suites
+make check              # build, then run all five suites
 make debug              # rebuild with -fsanitize=address,undefined
 make clean
 ```
@@ -36,7 +36,12 @@ python3 tests/test_confinement.py bin/de-tnfsd
 python3 tests/test_readonly.py    bin/de-tnfsd
 python3 tests/test_dropbox.py     bin/de-tnfsd
 python3 tests/test_serveroot.py   bin/de-tnfsd
+python3 tests/test_ignorecase.py  bin/de-tnfsd
 ```
+
+`test_ignorecase.py` probes whether the host filesystem is case-sensitive and
+skips the checks that a case-insensitive host (macOS, Windows) cannot exhibit —
+so its full set only runs on a case-sensitive filesystem such as Linux CI.
 
 `tests/tnfslib.py` is the shared client: it encodes the wire format directly
 from the protocol document rather than reusing anything from the daemon, so an
@@ -100,7 +105,13 @@ its checks by row number. Check any proposed change against that table.
 - **No path strings.** `path_resolve()` splits into components, rejects
   `..`/`.`/interior-empty, and walks from a startup dirfd with
   `openat(..., O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`. Never build a path with
-  `strcat`, never `realpath`, never `strstr(name, "..")`.
+  `strcat`, never `realpath`, never `strstr(name, "..")`. The `-i`
+  (`srv.ignore_case`) fallback stays inside this: on an exact `ENOENT` it
+  `readdir`s the directory the walk already holds and retries the same
+  `*at(dirfd, entry, O_NOFOLLOW)` against a real entry name — never a
+  constructed path. It resolves *existing* names only, so a create keeps the
+  requested spelling and the drop box (which resolves before the fold) stays
+  case-sensitive; do not extend it to create targets.
 - **Capabilities live on the fd.** `OPEN` records the capability set in the
   file slot; `READ`/`WRITE`/`LSEEK` check the fd's caps and never re-examine a
   path.

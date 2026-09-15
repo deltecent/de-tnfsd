@@ -33,6 +33,7 @@ check: $(BIN)
 	python3 tests/test_readonly.py $(BIN)
 	python3 tests/test_dropbox.py $(BIN)
 	python3 tests/test_serveroot.py $(BIN)
+	python3 tests/test_ignorecase.py $(BIN)
 
 install: $(BIN)
 	install -d $(DESTDIR)$(PREFIX)/sbin
