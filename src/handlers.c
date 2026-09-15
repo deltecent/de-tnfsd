@@ -86,7 +86,8 @@ static uint8_t mutation_refusal(enum zone z)
 
 static int statvfs_zone(struct statvfs *vfs)
 {
-    int fd = (srv.inc_fd >= 0) ? srv.inc_fd : srv.pub_fd;
+    int fd = (srv.inc_fd >= 0) ? srv.inc_fd
+           : (srv.pub_fd >= 0) ? srv.pub_fd : srv.root_fd;
     return fstatvfs(fd, vfs);
 }
 
@@ -134,6 +135,11 @@ static size_t h_mount(struct req *q, const struct sockaddr *peer,
         zone = -1;
 
     if (zone == ZONE_INCOMING && srv.inc_fd < 0)
+        zone = -1;
+
+    /* Serve-root modes have no sub-zones: only "/" is mountable, and it is the
+     * whole served tree. "/pub" and "/incoming" are just ordinary names then. */
+    if (srv.serve_mode != SERVE_SPLIT && zone != ZONE_ROOT)
         zone = -1;
 
     if (zone < 0) {
@@ -206,7 +212,7 @@ static uint8_t opendir_common(struct req *q, const char *path,
         return TNFS_EACCES;
     }
 
-    if (r.zone == ZONE_ROOT) {
+    if (r.zone == ZONE_ROOT && srv.serve_mode == SERVE_SPLIT) {
         resolved_release(&r);
         rc = dir_synthetic_root(&list);
         if (rc != TNFS_OK)
@@ -485,7 +491,8 @@ static size_t h_stat(struct req *q)
         int fd = (r.zone == ZONE_ROOT) ? srv.root_fd
                : (r.zone == ZONE_PUB)  ? srv.pub_fd : srv.inc_fd;
         uint16_t mode = (uint16_t)(S_IFDIR |
-                        (r.zone == ZONE_INCOMING ? 0311 : 0555));
+                        (r.zone == ZONE_INCOMING       ? 0311 :
+                         srv.serve_mode == SERVE_ROOT_RW ? 0755 : 0555));
         resolved_release(&r);
         if (fstat(fd, &st) != 0)
             return reply_status(q, (uint8_t)tnfs_errno(errno));
@@ -513,7 +520,10 @@ static size_t h_stat(struct req *q)
     if (S_ISLNK(st.st_mode))
         return reply_status(q, TNFS_ENOENT);
 
-    stat_reply(q, (uint16_t)(st.st_mode & ~0222u),   /* pub is read-only */
+    /* A read-only zone reports no write bits, since none of it can be written;
+     * the read/write serve-root zone reports the mode as it is on disk. */
+    stat_reply(q, (uint16_t)(srv.serve_mode == SERVE_ROOT_RW
+                             ? st.st_mode : (st.st_mode & ~0222u)),
                st.st_size > 0xffffffffLL ? 0xffffffffu : (uint32_t)st.st_size,
                (uint32_t)st.st_atime, (uint32_t)st.st_mtime,
                (uint32_t)st.st_ctime, &len);
@@ -642,6 +652,68 @@ static size_t open_in_dropbox(struct req *q, struct resolved *r, uint16_t flags)
     return reply_ok(q, 1);
 }
 
+/* --serve-root-rw only: a plain open of a real file under the root. Unlike the
+ * drop box there is no temp file and no no-overwrite rule -- the whole point of
+ * this mode is that the root behaves like an ordinary read/write share -- so
+ * the create/truncate/append flags act directly on the named file. The single
+ * authorization point still holds: the zone's capabilities (checked by the
+ * caller via path_resolve) are what allow the write; the flags only pick how. */
+static size_t open_in_serve_rw(struct req *q, struct resolved *r, uint16_t flags,
+                               const char *path)
+{
+    struct file_slot *f;
+    struct stat st;
+    int oflags = O_NOFOLLOW | O_CLOEXEC;
+    int acc = flags & TNFS_O_ACCMODE;
+    int writing = (acc == TNFS_O_WRONLY || acc == TNFS_O_RDWR);
+    int fd, handle;
+
+    if (acc == TNFS_O_WRONLY)     oflags |= O_WRONLY;
+    else if (acc == TNFS_O_RDWR)  oflags |= O_RDWR;
+    else                          oflags |= O_RDONLY;   /* RDONLY or unset */
+
+    /* Create/truncate/append only make sense on a write open; on a read open
+     * the request is served as a plain read, matching what pub does. */
+    if (writing) {
+        if (flags & TNFS_O_CREAT)  oflags |= O_CREAT;
+        if (flags & TNFS_O_EXCL)   oflags |= O_EXCL;
+        if (flags & TNFS_O_TRUNC)  oflags |= O_TRUNC;
+        if (flags & TNFS_O_APPEND) oflags |= O_APPEND;
+    }
+
+    fd = openat(r->dirfd, r->leaf, oflags, 0644);
+    if (fd < 0)
+        return reply_status(q, (uint8_t)tnfs_errno(errno));
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        int isdir = S_ISDIR(st.st_mode);
+        close(fd);
+        return reply_status(q, isdir ? TNFS_EISDIR : TNFS_ENOENT);
+    }
+
+    handle = session_alloc_file(q->s);
+    if (handle < 0) {
+        close(fd);
+        return reply_status(q, TNFS_EMFILE);
+    }
+    f = &q->s->files[handle];
+    f->fd = fd;
+    /* Capabilities live on the fd: a read open can only read, a write open can
+     * also create and modify. READ/WRITE/LSEEK check these, never the path. */
+    f->caps = CAP_READ | (writing ? (CAP_CREATE | CAP_MODIFY) : 0u);
+    f->zone = ZONE_ROOT;
+    f->opened = time(NULL);
+    f->last_active = f->opened;
+    f->size = (uint64_t)st.st_size;
+    f->apparent = (uint64_t)st.st_size;
+    snprintf(f->path, sizeof f->path, "%s", path);
+
+    log_info("open%s ip=%s name=%s size=%llu", writing ? " write" : "",
+             q->s->ip, f->path, (unsigned long long)f->size);
+
+    body(q)[0] = (uint8_t)handle;
+    return reply_ok(q, 1);
+}
+
 static size_t h_open(struct req *q)
 {
     char path[TNFS_MAX_PATH + 1];
@@ -673,6 +745,8 @@ static size_t h_open(struct req *q)
 
     if (r.zone == ZONE_INCOMING)
         len = open_in_dropbox(q, &r, flags);
+    else if (srv.serve_mode == SERVE_ROOT_RW)
+        len = open_in_serve_rw(q, &r, flags, path);
     else
         len = open_in_pub(q, &r, flags, path);
     resolved_release(&r);
@@ -765,6 +839,37 @@ static size_t h_write(struct req *q)
     if (want > TNFS_MAX_PAYLOAD)
         return reply_status(q, TNFS_EINVAL);
     data = q->data + 3;
+
+    /* A serve-root-rw file is an ordinary write: no drop-box temp file, quota
+     * or per-IP rate limit, and overwrite is allowed. The only bound is -s,
+     * checked against apparent size so a seek cannot buy extra room. */
+    if (!f->is_upload) {
+        uint64_t apparent;
+
+        done = 0;
+        pos = lseek(f->fd, 0, SEEK_CUR);
+        if (pos < 0)
+            return reply_status(q, (uint8_t)tnfs_errno(errno));
+        apparent = (uint64_t)pos + want;
+        if (apparent < f->apparent)
+            apparent = f->apparent;
+        if (srv.max_file_size && apparent > srv.max_file_size)
+            return reply_status(q, TNFS_EFBIG);
+
+        while (done < want) {
+            ssize_t n = write(f->fd, data + done, (size_t)want - done);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                return reply_status(q, (uint8_t)tnfs_errno(errno));
+            }
+            done += (size_t)n;
+        }
+        f->apparent = apparent;
+        f->last_active = time(NULL);
+        put_u16(body(q), (uint16_t)done);
+        return reply_ok(q, 2);
+    }
 
     if (!rate_allow_bytes(q->s->ip, want))
         return reply_backoff(q, 2000);

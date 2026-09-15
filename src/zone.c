@@ -13,7 +13,19 @@
 unsigned zone_caps(enum zone z)
 {
     switch (z) {
-    case ZONE_ROOT:     return CAP_LOOKUP | CAP_LIST;
+    case ZONE_ROOT:
+        /* In split mode the root is synthetic: it only names the two zones,
+         * so it looks up and lists but never reads. In a serve-root mode the
+         * root *is* the served zone and carries that mode's capabilities. This
+         * is the one place the disjointness invariant is deliberately relaxed:
+         * SERVE_ROOT_RW grants READ and CREATE on the same zone (DESIGN.md 4). */
+        switch (srv.serve_mode) {
+        case SERVE_ROOT_RO: return CAP_LOOKUP | CAP_LIST | CAP_READ;
+        case SERVE_ROOT_RW: return CAP_LOOKUP | CAP_LIST | CAP_READ |
+                                   CAP_CREATE | CAP_MODIFY;
+        case SERVE_SPLIT:   break;
+        }
+        return CAP_LOOKUP | CAP_LIST;
     case ZONE_PUB:      return CAP_LOOKUP | CAP_LIST | CAP_READ;
     case ZONE_INCOMING: return CAP_CREATE;
     }
@@ -104,7 +116,11 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
         return rc;
 
     if (mount_zone == ZONE_ROOT) {
-        if (ncomp == 0) {
+        if (srv.serve_mode != SERVE_SPLIT) {
+            /* Serve-root: there are no sub-zones. The whole path is relative
+             * to the root, which is a real read (or read/write) zone. */
+            zone = ZONE_ROOT;
+        } else if (ncomp == 0) {
             zone = ZONE_ROOT;
         } else {
             zone = zone_from_name(comps[0]);
@@ -123,12 +139,18 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
     out->caps = zone_caps((enum zone)zone);
 
     if (zone == ZONE_ROOT) {
-        out->dirfd = srv.root_fd;
-        out->has_leaf = 0;
-        return TNFS_OK;
+        if (srv.serve_mode == SERVE_SPLIT) {
+            /* Synthetic: the root names the two zones and holds no files of
+             * its own, so it never descends into anything. */
+            out->dirfd = srv.root_fd;
+            out->has_leaf = 0;
+            return TNFS_OK;
+        }
+        /* Serve-root: descend from the root dirfd exactly like pub below. */
+        dirfd = srv.root_fd;
+    } else {
+        dirfd = (zone == ZONE_PUB) ? srv.pub_fd : srv.inc_fd;
     }
-
-    dirfd = (zone == ZONE_PUB) ? srv.pub_fd : srv.inc_fd;
 
     if (zone == ZONE_INCOMING) {
         /* The drop box is flat: one leaf, no subdirectories. More than one
@@ -145,7 +167,8 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
         return TNFS_OK;
     }
 
-    /* pub: descend one component at a time, refusing symlinks outright. */
+    /* pub or a serve-root zone: descend one component at a time, refusing
+     * symlinks outright. */
     for (int i = start; i < ncomp - 1; i++) {
         int nfd = openat(dirfd, comps[i],
                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);

@@ -41,17 +41,22 @@ static void usage(FILE *f)
 {
     fprintf(f,
 "usage: de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]\n"
-"                [-q <max-total-bytes>] [--no-incoming] [-v] <root>\n"
+"                [-q <max-total-bytes>] [--no-incoming]\n"
+"                [--serve-root | --serve-root-rw] [-v] <root>\n"
 "\n"
 "  -p  port to listen on                            (default %d)\n"
-"  -s  maximum size of one uploaded file            (default 16M, 0 = no limit)\n"
+"  -s  maximum size of one uploaded/written file    (default 16M, 0 = no limit)\n"
 "  -n  maximum number of files in incoming/         (default 256, 0 = no limit)\n"
 "  -q  maximum total bytes in incoming/             (default 1G,  0 = no limit)\n"
 "      --no-incoming    serve pub/ only; reject all writes\n"
+"      --serve-root     serve <root> itself read-only; no drop box\n"
+"      --serve-root-rw  serve <root> itself read/write (create + overwrite)\n"
 "  -v  verbose logging\n"
 "\n"
 "Size arguments take an optional K, M or G suffix (powers of 1024).\n"
-"<root> must contain a pub/ directory and, unless --no-incoming, incoming/.\n",
+"By default <root> must contain a pub/ directory and, unless --no-incoming,\n"
+"incoming/. With --serve-root/--serve-root-rw the whole of <root> is served as\n"
+"one zone and no pub/ or incoming/ is required.\n",
         DEFAULT_PORT);
 }
 
@@ -72,6 +77,18 @@ static int parse_args(int argc, char **argv)
 
         if (strcmp(a, "--no-incoming") == 0) {
             srv.no_incoming = 1;
+            i++;
+            continue;
+        }
+        if (strcmp(a, "--serve-root") == 0 ||
+            strcmp(a, "--serve-root-rw") == 0) {
+            enum serve_mode m = (a[12] == '\0') ? SERVE_ROOT_RO : SERVE_ROOT_RW;
+            if (srv.serve_mode != SERVE_SPLIT && srv.serve_mode != m) {
+                fprintf(stderr, "de-tnfsd: --serve-root and --serve-root-rw "
+                                "are mutually exclusive\n");
+                return -1;
+            }
+            srv.serve_mode = m;
             i++;
             continue;
         }
@@ -158,6 +175,20 @@ static int open_zones(void)
         return -1;
     }
 
+    /* Serve-root modes have no pub/ or incoming/: the root itself is the one
+     * served zone. There is nothing to lay out and nothing to keep disjoint,
+     * so the split-mode checks below are skipped entirely. The drop box is off
+     * whatever else was asked. */
+    if (srv.serve_mode != SERVE_SPLIT) {
+        srv.no_incoming = 1;
+        (void)pub_st;
+        (void)inc_st;
+        log_info("--serve-root%s: serving %s as one %s zone, no drop box",
+                 srv.serve_mode == SERVE_ROOT_RW ? "-rw" : "", srv.root_path,
+                 srv.serve_mode == SERVE_ROOT_RW ? "read/write" : "read-only");
+        return 0;
+    }
+
     /* O_NOFOLLOW with O_DIRECTORY is what enforces "must not be a symlink". */
     srv.pub_fd = openat(srv.root_fd, "pub",
                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -212,6 +243,33 @@ static int probe_zones(void)
 {
     int fd;
     char tmp[32];
+
+    if (srv.serve_mode != SERVE_SPLIT) {
+        /* The served zone is the root itself: it must be readable, and in the
+         * read/write mode also writable. Both are checked by attempting them. */
+        fd = openat(srv.root_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (fd < 0) {
+            log_err("cannot read %s: %s", srv.root_path, strerror(errno));
+            return -1;
+        }
+        close(fd);
+
+        if (srv.serve_mode != SERVE_ROOT_RW)
+            return 0;
+
+        if (dropbox_make_temp(tmp, sizeof tmp) != 0)
+            return -1;
+        fd = openat(srv.root_fd, tmp,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0660);
+        if (fd < 0) {
+            log_err("cannot create files in %s: %s (needed for --serve-root-rw)",
+                    srv.root_path, strerror(errno));
+            return -1;
+        }
+        close(fd);
+        unlinkat(srv.root_fd, tmp, 0);
+        return 0;
+    }
 
     fd = openat(srv.pub_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) {
@@ -368,6 +426,25 @@ static int confine(void)
         return -1;
     }
 
+    if (srv.serve_mode != SERVE_SPLIT) {
+        /* One zone: the root itself, granted exactly its mode's rights. The
+         * read/write mode may create and overwrite regular files (MAKE_REG,
+         * WRITE_FILE, TRUNCATE) but not remove, rename or make directories. */
+        uint64_t rights = LANDLOCK_ACCESS_FS_READ_FILE |
+                          LANDLOCK_ACCESS_FS_READ_DIR;
+        if (srv.serve_mode == SERVE_ROOT_RW) {
+            rights |= LANDLOCK_ACCESS_FS_WRITE_FILE |
+                      LANDLOCK_ACCESS_FS_MAKE_REG;
+#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
+            if (abi >= 3)
+                rights |= LANDLOCK_ACCESS_FS_TRUNCATE;
+#endif
+        }
+        if (landlock_grant(ruleset_fd, srv.root_fd, rights) != 0) {
+            log_err("landlock rule for root: %s", strerror(errno));
+            goto out;
+        }
+    } else {
     /* The two zones, each granted exactly its capability set (DESIGN.md 4):
      * pub reads, incoming creates. The link that finalizes an upload stays
      * inside incoming, so it needs MAKE_REG and not REFER. */
@@ -386,6 +463,7 @@ static int confine(void)
         log_err("landlock rule for incoming: %s", strerror(errno));
         goto out;
     }
+    }
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         log_err("prctl(NO_NEW_PRIVS): %s", strerror(errno));
@@ -396,8 +474,15 @@ static int confine(void)
         goto out;
     }
 
-    log_info("landlock abi %d: pub read-only, incoming create-only, "
-             "no other path reachable", abi);
+    if (srv.serve_mode == SERVE_ROOT_RO)
+        log_info("landlock abi %d: root read-only, no other path reachable",
+                 abi);
+    else if (srv.serve_mode == SERVE_ROOT_RW)
+        log_info("landlock abi %d: root read/write (no remove/rename/mkdir), "
+                 "no other path reachable", abi);
+    else
+        log_info("landlock abi %d: pub read-only, incoming create-only, "
+                 "no other path reachable", abi);
     rc = 0;
 out:
     close(ruleset_fd);

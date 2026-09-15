@@ -14,6 +14,10 @@ Nothing else is served. There are no read-write directories, no per-user
 areas, and no authentication. The wire protocol is unchanged, so existing
 FujiNet and 8-bit clients work without modification.
 
+(For the quick-and-dirty case there are two opt-in flags that instead serve a
+single directory directly, read-only or read/write — see "Serving a directory
+directly" below. The two-zone server above is the default and is unchanged.)
+
 `DESIGN.md` is the specification; this README is how to build and run it.
 
 ## Building
@@ -23,7 +27,7 @@ There is no Windows build and there will not be one; see DESIGN.md §3.
 
 ```
 make                    # -> bin/de-tnfsd
-make check              # build and run the three test suites
+make check              # build and run the four test suites
 make debug              # rebuild with ASan and UBSan
 make install            # PREFIX=/usr/local
 ```
@@ -54,13 +58,16 @@ elsewhere than Linux, do those by hand.
 
 ```
 de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]
-         [-q <max-total-bytes>] [--no-incoming] [-v] <root>
+         [-q <max-total-bytes>] [--no-incoming]
+         [--serve-root | --serve-root-rw] [-v] <root>
 
   -p  port to listen on                            (default 16384)
-  -s  maximum size of one uploaded file            (default 16M, 0 = no limit)
+  -s  maximum size of one uploaded/written file    (default 16M, 0 = no limit)
   -n  maximum number of files in incoming/         (default 256, 0 = no limit)
   -q  maximum total bytes in incoming/             (default 1G,  0 = no limit)
-      --no-incoming    serve pub/ only; reject all writes
+      --no-incoming     serve pub/ only; reject all writes
+      --serve-root      serve <root> itself read-only; no drop box
+      --serve-root-rw   serve <root> itself read/write (create + overwrite)
   -v  verbose logging
 ```
 
@@ -83,6 +90,33 @@ On Linux it then applies a Landlock ruleset — read under `pub`, create under
 uid it was started as. Both are defence in depth: confinement of the served
 namespace comes from the dirfd walk, and the daemon runs unchanged on a
 kernel without Landlock.
+
+## Serving a directory directly
+
+The two-zone layout is the point of this daemon, but it is awkward for the
+throwaway case: pointing a server at a directory that already exists — a source
+repo, a folder of disk images — just to pull files off it. There is no `pub/`
+there, and making one defeats the purpose. Two flags collapse the namespace to
+a single zone rooted at `<root>` itself:
+
+```
+de-tnfsd --serve-root     <dir>    # read-only:  grab files, no writes
+de-tnfsd --serve-root-rw  <dir>    # read/write: also create and overwrite files
+```
+
+In both modes the whole of `<dir>` is served as one zone: it is listed and
+walked like any directory, no `pub/` or `incoming/` is needed (any that happen
+to exist are just ordinary entries), the drop box is off, and only `/` is
+mountable. `--serve-root` is read-only. `--serve-root-rw` additionally lets a
+client create a new file and **overwrite** an existing one — deliberately, and
+only when you ask for it; `-s` still caps a written file's size. Directory-shape
+changes (`MKDIR`, `RMDIR`, `UNLINK`, `RENAME`, `CHMOD`) are refused in every
+mode, so a client can rewrite a file's contents but never restructure the tree.
+
+These are a convenience for a quick local server. The default two-zone layout —
+with its guarantee that no path is ever both readable and writable — is
+unaffected and remains the mode you deploy. The daemon prints which mode it is
+in on its first log line.
 
 ## Permissions
 
@@ -177,4 +211,5 @@ it, running every check twice — once over UDP and once over TCP:
 python3 tests/test_confinement.py bin/de-tnfsd   # nothing outside the root is reachable
 python3 tests/test_readonly.py    bin/de-tnfsd   # pub refuses every mutation
 python3 tests/test_dropbox.py     bin/de-tnfsd   # DESIGN.md 5, row by row
+python3 tests/test_serveroot.py   bin/de-tnfsd   # --serve-root / --serve-root-rw
 ```
