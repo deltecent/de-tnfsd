@@ -3,9 +3,12 @@
 #include "server.h"
 #include "tnfs.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MAX_COMPONENTS 32
@@ -13,7 +16,19 @@
 unsigned zone_caps(enum zone z)
 {
     switch (z) {
-    case ZONE_ROOT:     return CAP_LOOKUP | CAP_LIST;
+    case ZONE_ROOT:
+        /* In split mode the root is synthetic: it only names the two zones,
+         * so it looks up and lists but never reads. In a serve-root mode the
+         * root *is* the served zone and carries that mode's capabilities. This
+         * is the one place the disjointness invariant is deliberately relaxed:
+         * SERVE_ROOT_RW grants READ and CREATE on the same zone (DESIGN.md 4). */
+        switch (srv.serve_mode) {
+        case SERVE_ROOT_RO: return CAP_LOOKUP | CAP_LIST | CAP_READ;
+        case SERVE_ROOT_RW: return CAP_LOOKUP | CAP_LIST | CAP_READ |
+                                   CAP_CREATE | CAP_MODIFY;
+        case SERVE_SPLIT:   break;
+        }
+        return CAP_LOOKUP | CAP_LIST;
     case ZONE_PUB:      return CAP_LOOKUP | CAP_LIST | CAP_READ;
     case ZONE_INCOMING: return CAP_CREATE;
     }
@@ -22,9 +37,17 @@ unsigned zone_caps(enum zone z)
 
 int zone_from_name(const char *name)
 {
-    if (strcmp(name, "pub") == 0)
+    /* The two zone names are fixed literals, so folding them under -i is a
+     * plain case-insensitive compare -- no directory scan and no ambiguity,
+     * since "pub" and "incoming" stay distinct under strcasecmp. This is the
+     * one name->zone map, so folding here covers both the mount location and
+     * the first component of every in-session path. */
+    int (*eq)(const char *, const char *) =
+        srv.ignore_case ? strcasecmp : strcmp;
+
+    if (eq(name, "pub") == 0)
         return ZONE_PUB;
-    if (strcmp(name, "incoming") == 0)
+    if (eq(name, "incoming") == 0)
         return ZONE_INCOMING;
     return -1;
 }
@@ -91,6 +114,45 @@ static int split_path(const char *path,
     return TNFS_OK;
 }
 
+/* Opt-in (-i) ASCII case-insensitive fallback. Only ever called after an exact
+ * match has already missed, so it never overrides an exact hit and costs
+ * nothing on the common path. It reads the directory the resolver is standing
+ * in via a fresh fd (fdopendir consumes it) and copies out the first entry that
+ * equals `want` under strcasecmp. Folding is ASCII-only and under the C locale
+ * by design: that is exactly what CP/M (uppercase) and DOS-style clients need,
+ * and it avoids inventing Unicode casing rules the filesystem never agreed to.
+ * On a case-preserving-but-insensitive host FS (macOS, Windows) an ambiguous
+ * match cannot arise; on a case-sensitive one two entries can differ only in
+ * case, and then the first found wins. Returns 0 and fills `real` on a match. */
+static int find_ci(int dirfd, const char *want, char *real, size_t realsz)
+{
+    int fd = openat(dirfd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *d;
+    struct dirent *de;
+    int found = -1;
+
+    if (fd < 0)
+        return -1;
+    d = fdopendir(fd);
+    if (d == NULL) {
+        close(fd);
+        return -1;
+    }
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        if (strcasecmp(de->d_name, want) == 0) {
+            if (strlen(de->d_name) < realsz) {
+                strcpy(real, de->d_name);
+                found = 0;
+            }
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
 int path_resolve(int mount_zone, const char *path, struct resolved *out)
 {
     char comps[MAX_COMPONENTS][TNFS_MAX_NAME + 1];
@@ -104,7 +166,11 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
         return rc;
 
     if (mount_zone == ZONE_ROOT) {
-        if (ncomp == 0) {
+        if (srv.serve_mode != SERVE_SPLIT) {
+            /* Serve-root: there are no sub-zones. The whole path is relative
+             * to the root, which is a real read (or read/write) zone. */
+            zone = ZONE_ROOT;
+        } else if (ncomp == 0) {
             zone = ZONE_ROOT;
         } else {
             zone = zone_from_name(comps[0]);
@@ -123,12 +189,18 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
     out->caps = zone_caps((enum zone)zone);
 
     if (zone == ZONE_ROOT) {
-        out->dirfd = srv.root_fd;
-        out->has_leaf = 0;
-        return TNFS_OK;
+        if (srv.serve_mode == SERVE_SPLIT) {
+            /* Synthetic: the root names the two zones and holds no files of
+             * its own, so it never descends into anything. */
+            out->dirfd = srv.root_fd;
+            out->has_leaf = 0;
+            return TNFS_OK;
+        }
+        /* Serve-root: descend from the root dirfd exactly like pub below. */
+        dirfd = srv.root_fd;
+    } else {
+        dirfd = (zone == ZONE_PUB) ? srv.pub_fd : srv.inc_fd;
     }
-
-    dirfd = (zone == ZONE_PUB) ? srv.pub_fd : srv.inc_fd;
 
     if (zone == ZONE_INCOMING) {
         /* The drop box is flat: one leaf, no subdirectories. More than one
@@ -145,14 +217,22 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
         return TNFS_OK;
     }
 
-    /* pub: descend one component at a time, refusing symlinks outright. */
+    /* pub or a serve-root zone: descend one component at a time, refusing
+     * symlinks outright. */
     for (int i = start; i < ncomp - 1; i++) {
         int nfd = openat(dirfd, comps[i],
                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (nfd < 0 && errno == ENOENT && srv.ignore_case) {
+            char real[TNFS_MAX_NAME + 1];
+            if (find_ci(dirfd, comps[i], real, sizeof real) == 0)
+                nfd = openat(dirfd, real,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        }
         if (nfd < 0) {
+            int e = errno;
             if (owned)
                 close(dirfd);
-            return tnfs_errno(errno);
+            return tnfs_errno(e);
         }
         if (owned)
             close(dirfd);
@@ -165,6 +245,19 @@ int path_resolve(int mount_zone, const char *path, struct resolved *out)
     if (ncomp - start >= 1) {
         strcpy(out->leaf, comps[ncomp - 1]);
         out->has_leaf = 1;
+        /* Resolve the leaf to its real casing only when it names a file that
+         * already exists: an exact hit is left alone, and a genuine miss keeps
+         * the requested name so a create still uses what the client asked for.
+         * That is what confines the fold to "find an existing name" and keeps
+         * every create -- including the drop box, which returned above -- exact. */
+        if (srv.ignore_case) {
+            struct stat st;
+            char real[TNFS_MAX_NAME + 1];
+            if (fstatat(dirfd, out->leaf, &st, AT_SYMLINK_NOFOLLOW) != 0 &&
+                errno == ENOENT &&
+                find_ci(dirfd, out->leaf, real, sizeof real) == 0)
+                strcpy(out->leaf, real);
+        }
     }
     return TNFS_OK;
 }

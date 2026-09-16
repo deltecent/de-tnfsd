@@ -48,6 +48,11 @@ to `ENOENT`. This means a stray file dropped in the root by an admin is not
 accidentally served, and it removes the root directory as a place where the
 two zones could interact.
 
+(The opt-in serve-root modes of §2 turn this off deliberately: there `<root>`
+*is* the served zone and is listed like any directory. That is the whole point
+of those modes, and it is why they are a separate, explicitly-requested
+configuration rather than a default.)
+
 `incoming` is flat. There are no subdirectories in it, and `MKDIR` is refused
 everywhere. A flat drop box is much easier to reason about: there is exactly
 one directory in the system that the daemon can write to, and it has no
@@ -64,6 +69,10 @@ Six capabilities, assigned per zone. This is the whole policy:
 | `/pub`      | yes    | yes       | yes  | no     | no     | no     |
 | `/incoming` | no     | no        | no   | yes    | no     | no     |
 
+This is the default two-zone layout. The `/` row is mode-dependent: the
+serve-root modes (below) give it READ, and `--serve-root-rw` also gives it
+CREATE and MODIFY.
+
 - **LOOKUP** — may learn whether a name exists (`STAT`, and any error that
   distinguishes "no such file" from "not permitted").
 - **LIST** — may enumerate names.
@@ -73,10 +82,12 @@ Six capabilities, assigned per zone. This is the whole policy:
 - **MODIFY** — overwrite, truncate, append, rename, chmod.
 - **REMOVE** — unlink, rmdir.
 
-MODIFY and REMOVE are unset in every row. They are kept in the table so that
-the code has a real capability to check rather than a hardcoded `return
-EROFS`, and so a future variant (a moderated area, a per-device scratch zone)
-has somewhere to attach without reopening the design.
+MODIFY and REMOVE are unset in every row of the default layout. They are kept
+in the table so that the code has a real capability to check rather than a
+hardcoded `return EROFS`, and so a variant has somewhere to attach without
+reopening the design — `--serve-root-rw` is exactly such a variant, and it
+turns MODIFY on for the root zone (REMOVE stays off, so the tree cannot be
+restructured). See "Serve-root modes" below.
 
 The invariant worth stating out loud, because everything else exists to
 protect it:
@@ -88,6 +99,59 @@ protect it:
 Startup checks that enforce it: `pub` and `incoming` must both exist, must be
 real directories (not symlinks), must be on the same mount as root, and must
 not be the same directory (compared by `st_dev`/`st_ino`, not by name).
+
+This is the **default** and the only mode in which the invariant holds
+structurally. The two serve-root modes below relax it deliberately and only
+when explicitly asked for; the default server is unchanged.
+
+### Serve-root modes: an opt-in single zone
+
+The split above is what makes de-tnfsd worth having, but it also makes it
+useless for the most mundane case: pointing a daemon at a directory that
+already exists — a source repo, a folder of disk images — to grab files off
+it. There is no `pub/` there, and creating one and moving everything into it
+defeats the point.
+
+Two flags collapse the namespace to a single zone rooted at `<root>` itself,
+for that case and no other:
+
+| Flag              | Root zone capabilities                     | Drop box |
+|-------------------|--------------------------------------------|----------|
+| *(none, default)* | synthetic `/`, plus `/pub` and `/incoming` | yes      |
+| `--serve-root`    | LOOKUP, LIST, READ                          | no       |
+| `--serve-root-rw` | LOOKUP, LIST, READ, CREATE, MODIFY          | no       |
+
+In these modes `<root>` is no longer synthetic: it is walked and listed like
+any directory, and a `pub/` or `incoming/` that happens to be present is served
+as an ordinary entry, not as a zone. Only `/` is mountable; the two zone names
+lose their meaning.
+
+`--serve-root` is read-only and upholds the invariant the easy way — the one
+zone has no CREATE, so the readable and writable sets are `{everything}` and
+`{}`, still disjoint. It implies no drop box.
+
+`--serve-root-rw` is the one configuration in which a single zone holds **both**
+READ and CREATE, and it is therefore the one place the invariant is knowingly
+given up. It exists because "serve this repo read/write over TNFS" is a real
+thing to want from a throwaway local daemon, and a caller who types
+`--serve-root-rw` is asking for exactly that. What it grants is deliberately
+narrow — it is a **file** server, not a general one:
+
+- `OPEN` may create a new file and may **overwrite** an existing one (the drop
+  box's cardinal sin; here it is the point). `READ`/`WRITE`/`LSEEK` follow the
+  fd's capabilities as always.
+- The directory-shape mutations stay refused in every mode: `MKDIR`, `RMDIR`,
+  `UNLINK`, `RENAME`, `CHMOD` all still return `EROFS`. You can rewrite a
+  file's contents; you cannot restructure the tree, move a file, or change its
+  mode.
+- `-s` caps a written file's apparent size with `EFBIG`, exactly as it caps an
+  upload. `-n`/`-q` are drop-box accounting and do not apply.
+
+Because these modes serve `<root>` directly, the drop-box threat table (§5) is
+not relevant to them: there is no zone whose existence is a secret. They are a
+convenience, chosen at startup, and the daemon says which mode it is in on its
+first log line. The rest of this document describes the default two-zone
+server unless it says otherwise.
 
 ### The daemon is the only enforcement point
 
@@ -168,6 +232,47 @@ exists — which is exactly the property that keeps the drop box opaque.
 
 Handlers act through `openat`, `fstatat`, `unlinkat` and friends relative to
 the resolved directory fd. No handler ever builds an absolute path string.
+
+### Case-insensitive matching (`-i`), an opt-in fallback
+
+Names are matched exactly by default. `-i` adds a fallback for the clients that
+have no concept of case: CP/M upper-cases every filename, and users coming from
+macOS or Windows expect `HELLO.TXT` and `hello.txt` to name the same file. It
+is a *miss-path* addition and nothing more. Each `openat`/`fstatat` in the walk
+is tried with the requested spelling first; only when that returns `ENOENT`
+does the resolver read the directory it is standing in and, if exactly one
+entry matches under an ASCII `strcasecmp`, retry the `*at` call against that
+real on-disk name. An exact hit never triggers a scan, so the common path is
+untouched.
+
+The fold is deliberately narrow, and none of it moves the authorization
+boundary:
+
+- **It only ever finds a name that already exists.** The scan runs on an
+  `ENOENT`, so a genuine miss keeps the requested spelling and a *create* uses
+  exactly what the client asked for. Reads and an overwrite of an existing file
+  (in `--serve-root-rw`) fold; creation does not. The drop box, whose resolve
+  returns before this point, stays fully case-sensitive — two differently-cased
+  uploads never collide, and the "name already taken" check is still exact.
+- **Confinement is unchanged.** The scan is a `readdir` of the directory the
+  walk already holds open; the retry is the same `openat(dirfd, name,
+  O_NOFOLLOW)` against a name that came from that directory's own entries. No
+  path string is built, `..` and `.` are still rejected in the split before any
+  of this, and a symlink still fails the `O_NOFOLLOW` open.
+- **ASCII only, under the C locale.** That is exactly what CP/M and DOS-style
+  clients need; UTF-8 non-ASCII bytes are not folded, so the daemon never
+  invents Unicode casing rules the filesystem did not agree to. On a
+  case-insensitive host filesystem the ambiguous case cannot arise; on a
+  case-sensitive one two entries can differ only in case, and the first found
+  wins.
+- **The two zone names fold as well.** `zone_from_name()` is the single
+  `name`→zone map, used both for a `MOUNT` location and for the first component
+  of an in-session path; under `-i` its comparison is `strcasecmp`, so `/PUB`
+  and `/INCOMING` reach `pub` and `incoming`. This needs no scan and admits no
+  ambiguity — the two names are fixed literals that stay distinct when folded —
+  and it changes only *which* zone a name selects, never that zone's
+  capabilities. Without it, a client that upper-cases the whole command line
+  (CP/M's CCP does) would clear the leaf fold only to be stopped at the zone.
 
 ### Per-fd capabilities
 
@@ -600,29 +705,47 @@ that binds two sockets at startup, and it complicates the step ordering above.
 
 ```
 de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]
-         [-q <max-total-bytes>] [--no-incoming] <root>
+         [-q <max-total-bytes>] [--no-incoming]
+         [--serve-root | --serve-root-rw] [-i] <root>
 
   -p  port to listen on                            (default 16384)
-  -s  maximum size of one uploaded file            (default 16M, 0 = no limit)
+  -s  maximum size of one uploaded/written file    (default 16M, 0 = no limit)
   -n  maximum number of files in incoming/         (default 256, 0 = no limit)
   -q  maximum total bytes in incoming/             (default 1G,  0 = no limit)
-      --no-incoming    serve pub/ only; reject all writes
+      --no-incoming     serve pub/ only; reject all writes
+      --serve-root      serve <root> itself read-only; no drop box
+      --serve-root-rw   serve <root> itself read/write (create + overwrite)
+  -i  match existing names case-insensitively (ASCII); create stays exact
 ```
 
 Size arguments accept a `K`, `M`, or `G` suffix (powers of 1024); a bare
 number is bytes. Out-of-range or unparseable values are a startup error, not a
 silently clamped default. Semantics for all three are in §6.
 
-That is the whole of it. There is no `-r`: read-only is the only mode `pub`
-has. There is no `-i`: the drop box is `<root>/incoming` or it does not exist.
-`--no-incoming` runs a pure read-only server, for hosts that should not accept
-uploads at all — it is the only way to disable the drop box, since `-n 0`
-means unlimited rather than zero files.
+`--serve-root` and `--serve-root-rw` are the two serve-root modes of §2: they
+collapse the namespace to the single zone `<root>`, need no `pub/` or
+`incoming/`, and turn the drop box off (so `-n`/`-q` no longer apply, and `-s`
+bounds a written file instead of an upload). They are mutually exclusive. In
+these modes there is no layout to check, so the only startup requirement is
+that `<root>` be readable — and, for `--serve-root-rw`, writable.
 
-The daemon refuses to start rather than degrade: missing `pub`, missing
-`incoming` (without `--no-incoming`), either one a symlink, the two resolving
-to the same directory, or `incoming` not writable by the daemon's uid are all
-fatal at startup with a specific message.
+`-i` turns on the case-insensitive matching fallback of §3: an exact miss
+retries against a case-folded directory entry, for CP/M and desktop clients
+that have no notion of case. It resolves existing names only — a create keeps
+the requested spelling — so the drop box stays case-sensitive and the
+disjointness invariant is untouched. It applies in every mode.
+
+Otherwise: there is no `-r` selecting read-only for `pub`; read-only is the
+only mode `pub` has. The drop box is `<root>/incoming` or it does not exist;
+its location is not configurable. `--no-incoming` runs a pure read-only two-zone server, for
+hosts that should not accept uploads at all — it disables the drop box while
+keeping the `pub`/`incoming` split, since `-n 0` means unlimited rather than
+zero files.
+
+In the default (split) mode the daemon refuses to start rather than degrade:
+missing `pub`, missing `incoming` (without `--no-incoming`), either one a
+symlink, the two resolving to the same directory, or `incoming` not writable by
+the daemon's uid are all fatal at startup with a specific message.
 
 
 ## 9. Compatibility, and what this drops
@@ -642,9 +765,15 @@ Carried over from the current implementation:
 
 Deliberately dropped:
 
-- Read-write directories of any kind.
-- `UNLINK`, `RENAME`, `CHMOD`, `MKDIR`, `RMDIR` — all refused, all zones.
-- Arbitrary per-session mount subdirectories; only `/`, `/pub`, `/incoming`.
+- Read-write directories in the default two-zone server. The opt-in
+  `--serve-root-rw` mode (§2, §8) is the sole exception: it serves `<root>` as
+  one read/write zone, on purpose, only when asked. Nothing about the default
+  layout gains a read-write zone.
+- `UNLINK`, `RENAME`, `CHMOD`, `MKDIR`, `RMDIR` — all refused, all zones, in
+  every mode including `--serve-root-rw` (which allows file create/overwrite
+  but no directory-shape change).
+- Arbitrary per-session mount subdirectories; only `/`, `/pub`, `/incoming` in
+  the default server, and only `/` in a serve-root mode.
 - `.ignore` files. Client-visible filtering that the client can also turn off
   is not a security mechanism, and it is a second, weaker path-matching engine
   to maintain.

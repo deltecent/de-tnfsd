@@ -22,7 +22,7 @@ files themselves are off limits.
 
 ```
 make                    # -> bin/de-tnfsd
-make check              # build, then run all three suites
+make check              # build, then run all six suites
 make debug              # rebuild with -fsanitize=address,undefined
 make clean
 ```
@@ -35,7 +35,14 @@ taking the daemon path as `argv[1]`, so a single suite runs on its own:
 python3 tests/test_confinement.py bin/de-tnfsd
 python3 tests/test_readonly.py    bin/de-tnfsd
 python3 tests/test_dropbox.py     bin/de-tnfsd
+python3 tests/test_serveroot.py   bin/de-tnfsd
+python3 tests/test_ignorecase.py  bin/de-tnfsd
+python3 tests/test_tcpchurn.py    bin/de-tnfsd
 ```
+
+`test_ignorecase.py` probes whether the host filesystem is case-sensitive and
+skips the checks that a case-insensitive host (macOS, Windows) cannot exhibit —
+so its full set only runs on a case-sensitive filesystem such as Linux CI.
 
 `tests/tnfslib.py` is the shared client: it encodes the wire format directly
 from the protocol document rather than reusing anything from the daemon, so an
@@ -53,9 +60,20 @@ the sanitizers catch what the protocol-level checks cannot see.
 > No zone has both READ and CREATE. The set of readable paths and the set of
 > writable paths are disjoint.
 
-Zone names are fixed and deliberately not configurable. The root is synthetic:
-it lists exactly `pub` and `incoming` whatever else is on disk, and any other
-first component is `ENOENT`.
+This holds in the **default** two-zone server, and it is what the code is built
+around. The two opt-in serve-root modes (`--serve-root`, `--serve-root-rw`,
+DESIGN.md §2) relax it on purpose and only when asked: they collapse the
+namespace to the single zone `<root>`. `--serve-root` is read-only (still
+disjoint, trivially); `--serve-root-rw` is the one configuration where a zone
+holds both READ and CREATE, deliberately. Guard against *accidentally*
+reintroducing a read-write zone in the default server; do not "fix" the
+serve-root modes back out.
+
+Zone names are fixed and deliberately not configurable. In the default server
+the root is synthetic: it lists exactly `pub` and `incoming` whatever else is
+on disk, and any other first component is `ENOENT`. In a serve-root mode the
+root is a real zone walked and listed like any directory, `srv.serve_mode`
+carries which mode is active, and only `/` is mountable.
 
 `DESIGN.md` §5 enumerates the twelve channels by which the drop box could leak
 and what closes each; it is the spec for `tests/test_dropbox.py`, which labels
@@ -88,7 +106,13 @@ its checks by row number. Check any proposed change against that table.
 - **No path strings.** `path_resolve()` splits into components, rejects
   `..`/`.`/interior-empty, and walks from a startup dirfd with
   `openat(..., O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`. Never build a path with
-  `strcat`, never `realpath`, never `strstr(name, "..")`.
+  `strcat`, never `realpath`, never `strstr(name, "..")`. The `-i`
+  (`srv.ignore_case`) fallback stays inside this: on an exact `ENOENT` it
+  `readdir`s the directory the walk already holds and retries the same
+  `*at(dirfd, entry, O_NOFOLLOW)` against a real entry name — never a
+  constructed path. It resolves *existing* names only, so a create keeps the
+  requested spelling and the drop box (which resolves before the fold) stays
+  case-sensitive; do not extend it to create targets.
 - **Capabilities live on the fd.** `OPEN` records the capability set in the
   file slot; `READ`/`WRITE`/`LSEEK` check the fd's caps and never re-examine a
   path.
@@ -114,12 +138,16 @@ its checks by row number. Check any proposed change against that table.
 
 ## Deliberately absent — do not reintroduce
 
-Read-write directories of any kind; working `UNLINK`/`RENAME`/`CHMOD`/`MKDIR`/
-`RMDIR` (refused in every zone, including within a single zone); arbitrary
-mount subdirectories (only `/`, `/pub`, `/incoming`); `.ignore` files; users,
-passwords, per-user areas; Windows support; Atari ATR virtualization; and
-`OPENDIRX`'s recursive traverse — its flag is accepted and ignored, yielding a
-normal single-level listing rather than an error.
+Read-write directories in the default two-zone server (the opt-in
+`--serve-root-rw` mode is the one sanctioned exception, and it still refuses
+every directory-shape mutation); working `UNLINK`/`RENAME`/`CHMOD`/`MKDIR`/
+`RMDIR` (refused in every zone and every mode, including `--serve-root-rw`,
+which allows file create/overwrite but no tree restructuring); arbitrary mount
+subdirectories (only `/`, `/pub`, `/incoming` by default, only `/` in a
+serve-root mode); `.ignore` files; users, passwords, per-user areas; Windows
+support; Atari ATR virtualization; and `OPENDIRX`'s recursive traverse — its
+flag is accepted and ignored, yielding a normal single-level listing rather
+than an error.
 
 ## Interpretations the spec left open
 

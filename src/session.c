@@ -190,10 +190,16 @@ int session_close_file(struct session *s, int handle, int commit)
                      s->ip, f->target, (unsigned long long)f->apparent,
                      (long long)(time(NULL) - f->opened));
         }
-    } else if (f->zone == ZONE_PUB) {
+    } else if (f->zone == ZONE_ROOT && (f->caps & CAP_MODIFY)) {
+        /* A serve-root-rw write handle: one closing line with what was put. */
+        log_info("write ok ip=%s name=%s bytes=%llu duration=%llds",
+                 s->ip, f->path, (unsigned long long)f->apparent,
+                 (long long)(time(NULL) - f->opened));
+    } else if (f->zone == ZONE_PUB || f->zone == ZONE_ROOT) {
         /* Every "download start" gets exactly one closing line, whether the
          * client closed the handle, dropped the connection, or idled out: an
-         * unclosed download arrives here via session_close().
+         * unclosed download arrives here via session_close(). A read handle in
+         * a serve-root mode is logged the same way.
          *
          * "ok" means the client saw the whole file. Either signal will do:
          * some clients read until EOF, others take the size from STAT and

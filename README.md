@@ -14,6 +14,10 @@ Nothing else is served. There are no read-write directories, no per-user
 areas, and no authentication. The wire protocol is unchanged, so existing
 FujiNet and 8-bit clients work without modification.
 
+(For the quick-and-dirty case there are two opt-in flags that instead serve a
+single directory directly, read-only or read/write — see "Serving a directory
+directly" below. The two-zone server above is the default and is unchanged.)
+
 `DESIGN.md` is the specification; this README is how to build and run it.
 
 ## Building
@@ -23,7 +27,7 @@ There is no Windows build and there will not be one; see DESIGN.md §3.
 
 ```
 make                    # -> bin/de-tnfsd
-make check              # build and run the three test suites
+make check              # build and run the five test suites
 make debug              # rebuild with ASan and UBSan
 make install            # PREFIX=/usr/local
 ```
@@ -54,13 +58,17 @@ elsewhere than Linux, do those by hand.
 
 ```
 de-tnfsd [-p <port>] [-s <max-file-size>] [-n <max-files>]
-         [-q <max-total-bytes>] [--no-incoming] [-v] <root>
+         [-q <max-total-bytes>] [--no-incoming]
+         [--serve-root | --serve-root-rw] [-i] [-v] <root>
 
   -p  port to listen on                            (default 16384)
-  -s  maximum size of one uploaded file            (default 16M, 0 = no limit)
+  -s  maximum size of one uploaded/written file    (default 16M, 0 = no limit)
   -n  maximum number of files in incoming/         (default 256, 0 = no limit)
   -q  maximum total bytes in incoming/             (default 1G,  0 = no limit)
-      --no-incoming    serve pub/ only; reject all writes
+      --no-incoming     serve pub/ only; reject all writes
+      --serve-root      serve <root> itself read-only; no drop box
+      --serve-root-rw   serve <root> itself read/write (create + overwrite)
+  -i  match existing names case-insensitively (ASCII); create stays exact
   -v  verbose logging
 ```
 
@@ -83,6 +91,57 @@ On Linux it then applies a Landlock ruleset — read under `pub`, create under
 uid it was started as. Both are defence in depth: confinement of the served
 namespace comes from the dirfd walk, and the daemon runs unchanged on a
 kernel without Landlock.
+
+## Serving a directory directly
+
+The two-zone layout is the point of this daemon, but it is awkward for the
+throwaway case: pointing a server at a directory that already exists — a source
+repo, a folder of disk images — just to pull files off it. There is no `pub/`
+there, and making one defeats the purpose. Two flags collapse the namespace to
+a single zone rooted at `<root>` itself:
+
+```
+de-tnfsd --serve-root     <dir>    # read-only:  grab files, no writes
+de-tnfsd --serve-root-rw  <dir>    # read/write: also create and overwrite files
+```
+
+In both modes the whole of `<dir>` is served as one zone: it is listed and
+walked like any directory, no `pub/` or `incoming/` is needed (any that happen
+to exist are just ordinary entries), the drop box is off, and only `/` is
+mountable. `--serve-root` is read-only. `--serve-root-rw` additionally lets a
+client create a new file and **overwrite** an existing one — deliberately, and
+only when you ask for it; `-s` still caps a written file's size. Directory-shape
+changes (`MKDIR`, `RMDIR`, `UNLINK`, `RENAME`, `CHMOD`) are refused in every
+mode, so a client can rewrite a file's contents but never restructure the tree.
+
+These are a convenience for a quick local server. The default two-zone layout —
+with its guarantee that no path is ever both readable and writable — is
+unaffected and remains the mode you deploy. The daemon prints which mode it is
+in on its first log line.
+
+## Case-insensitive names
+
+Names are matched exactly by default. `-i` adds a fallback for clients that have
+no notion of case: CP/M upper-cases every filename, and macOS and Windows users
+expect `HELLO.TXT` and `hello.txt` to reach the same file. With `-i`, a lookup
+that misses exactly retries against the directory's real entries using ASCII
+case folding, so any casing of an existing name resolves to the file on disk.
+The two zone names fold as well — `/PUB` and `/INCOMING` reach `pub` and
+`incoming`, whether as a mount location or as the first component of a path —
+so a client that upper-cases the whole command line is not stopped at the zone.
+
+The fold is narrow on purpose:
+
+- It **only finds names that already exist**. A create keeps exactly the
+  spelling the client asked for, so uploads to the drop box stay
+  case-sensitive and two differently-cased names never collide there.
+- It changes nothing about confinement: it is a `readdir` of a directory the
+  resolver already holds open, still walked one component at a time with
+  `O_NOFOLLOW`, and `..` is still refused.
+- It is ASCII-only (the C locale), which is what CP/M and DOS-style clients
+  need; non-ASCII UTF-8 bytes are not folded.
+
+`-i` works in every mode — the two-zone server and both serve-root modes.
 
 ## Permissions
 
@@ -216,4 +275,6 @@ it, running every check twice — once over UDP and once over TCP:
 python3 tests/test_confinement.py bin/de-tnfsd   # nothing outside the root is reachable
 python3 tests/test_readonly.py    bin/de-tnfsd   # pub refuses every mutation
 python3 tests/test_dropbox.py     bin/de-tnfsd   # DESIGN.md 5, row by row
+python3 tests/test_serveroot.py   bin/de-tnfsd   # --serve-root / --serve-root-rw
+python3 tests/test_ignorecase.py  bin/de-tnfsd   # -i folds an existing name, only that
 ```
