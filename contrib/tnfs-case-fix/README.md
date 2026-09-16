@@ -1,19 +1,34 @@
 # tnfs-case-fix.sh
 
-For deployments that need uppercase file names, like CP/M.
+Drains `incoming/` into `for-review/` on a schedule. Also renames files to
+uppercase under `pub/`/`for-review/`, as an on-disk alternative to the
+daemon's `-i` flag.
 
-Many 8-bit clients send every path in uppercase. CP/M's command processor
-converts a whole command line to uppercase before any program sees it. On
-a case-sensitive filesystem, a file added with a lowercase name (`scp`,
-`rsync`, a tarball) is unreachable to that client. This script renames such
-files to uppercase under `pub/` and `for-review/`, on a schedule, so they
-become reachable again.
+## Draining incoming/
 
-The same script also drains `incoming/` into `for-review/` as its first
-step, needed before there is anything under `for-review/` to rename. See
-the main `README.md`'s "Draining the drop box" section for what that does,
-why it is safe, and how to set up `for-review/`. This doc only covers the
-uppercase-rename half.
+This script's main job is to move each finished upload out of `incoming/`
+into `for-review/`. See the main `README.md`'s "Draining the drop box"
+section for what that does, why it is safe, and how to set up
+`for-review/`. This doc only covers the rename step below.
+
+## The rename step: an alternative to `-i`
+
+The daemon's `-i` flag (see "Case-insensitive names" in the main README)
+folds case at lookup time. It changes no files on disk. Any casing of an
+existing name then resolves.
+
+This script's rename step does a similar job a different way. It changes
+the file names once, on disk, instead of folding every lookup.
+
+Use the rename step if you want `pub` to show uppercase names to a person
+who browses it directly. Use it if you are not running `-i`. Use it if you
+want the uppercase names on disk regardless of the flag.
+
+Many 8-bit clients need one of the two. CP/M's command processor converts a
+whole command line to uppercase before any program sees it. A file added
+with a lowercase name (`scp`, `rsync`, a tarball) is then unreachable to
+that client. This holds unless the server runs `-i`, or this script has
+renamed the file.
 
 ## What the rename step does
 

@@ -201,9 +201,11 @@ do not want, needs `sudo` unless the operator is in group `tnfs` — a small,
 deliberate piece of friction on the one action that changes what is public.
 No group membership is required just to review.
 
-See `contrib/tnfs-case-fix/README.md` for install steps, and for the
-uppercase-name fix this same script applies under `pub`/`for-review` if
-your clients need it (CP/M and other 8-bit systems typically do).
+See `contrib/tnfs-case-fix/README.md` for install steps. That script also
+renames files to uppercase under `pub`/`for-review`. This is an on-disk
+alternative to `-i` (see "Case-insensitive names" above). `-i` folds case
+at lookup time and changes no files. The rename changes the files once, on
+disk.
 
 ## Tests
 
