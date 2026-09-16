@@ -164,16 +164,11 @@ int net_run(void)
         if (pfd[0].revents & POLLIN)
             serve_udp();
 
-        if (pfd[1].revents & POLLIN) {
-            int c = accept(srv.tcp_fd, NULL, NULL);
-            if (c >= 0) {
-                if (nclients < MAX_TCP_CLIENTS)
-                    clients[nclients++] = c;
-                else
-                    close(c);
-            }
-        }
-
+        /* Service the clients that this pass actually polled before accepting
+         * any new one. A fd accepted now has no revents in pfd[] yet; letting
+         * it fall into the loop below would read a stale slot (index nfds,
+         * never filled this pass) and could close it on a leftover POLLHUP
+         * before its first recv. The new fd is appended and polled next pass. */
         for (int i = 0; i < nclients; i++) {
             int alive = 1;
             if (pfd[2 + i].revents & (POLLIN | POLLHUP | POLLERR)) {
@@ -187,6 +182,16 @@ int net_run(void)
                 close(clients[i]);
                 clients[i] = clients[--nclients];
                 i--;
+            }
+        }
+
+        if (pfd[1].revents & POLLIN) {
+            int c = accept(srv.tcp_fd, NULL, NULL);
+            if (c >= 0) {
+                if (nclients < MAX_TCP_CLIENTS)
+                    clients[nclients++] = c;
+                else
+                    close(c);
             }
         }
 

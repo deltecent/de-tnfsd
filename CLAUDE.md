@@ -22,7 +22,7 @@ files themselves are off limits.
 
 ```
 make                    # -> bin/de-tnfsd
-make check              # build, then run all five suites
+make check              # build, then run all six suites
 make debug              # rebuild with -fsanitize=address,undefined
 make clean
 ```
@@ -37,6 +37,7 @@ python3 tests/test_readonly.py    bin/de-tnfsd
 python3 tests/test_dropbox.py     bin/de-tnfsd
 python3 tests/test_serveroot.py   bin/de-tnfsd
 python3 tests/test_ignorecase.py  bin/de-tnfsd
+python3 tests/test_tcpchurn.py    bin/de-tnfsd
 ```
 
 `test_ignorecase.py` probes whether the host filesystem is case-sensitive and
