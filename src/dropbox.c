@@ -14,6 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
+/* contrib/tnfs-case-fix/tnfs-case-fix.sh treats any non-dot name in incoming/
+ * as a finished upload; keep this prefix dot-led if it ever changes. */
 #define TMP_PREFIX ".tmp-"
 
 void dropbox_scan(void)
