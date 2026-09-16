@@ -69,5 +69,9 @@ Check it any time you're in `for-review/` reviewing uploads — an empty file
 3. Edit `ROOT` at the top of the script if your TNFS root is not
    `/srv/tnfs`.
 
+If `for-review/` does not exist yet, step 1 skips the `incoming/` sweep and
+logs a `WARNING` line instead of silently doing nothing — check the log if
+uploads are not draining.
+
 No user or group setup is needed. This install never touches an existing
 account's group membership.

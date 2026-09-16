@@ -175,7 +175,9 @@ int session_close_file(struct session *s, int handle, int commit)
              * file that appeared under the target name while the upload was
              * in flight, and overwriting is the one thing this zone must
              * never do. A collision is the same EACCES as every other
-             * refusal here. */
+             * refusal here. contrib/tnfs-case-fix/tnfs-case-fix.sh relies on
+             * this being linkat-then-unlink: a non-dot name in incoming/
+             * implies a complete upload only because of this ordering. */
             int e = errno;
             unlinkat(srv.inc_fd, f->tmpname, 0);
             dropbox_close_abort(f->apparent);
