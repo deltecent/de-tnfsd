@@ -97,6 +97,7 @@ static size_t h_mount(struct req *q, const struct sockaddr *peer,
                       socklen_t peerlen, int tcp_fd)
 {
     char location[TNFS_MAX_PATH + 1], userid[64], password[64];
+    char comp[TNFS_MAX_NAME + 1];
     size_t off = 0;
     struct session *s;
     int zone;
@@ -118,21 +119,25 @@ static size_t h_mount(struct req *q, const struct sockaddr *peer,
     (void)password;
 
     /* Only "/", "/pub" and "/incoming" are mountable; a mount is resolved to
-     * a zone once, so mounting /pub is the same as mounting / and prefixing. */
+     * a zone once, so mounting /pub is the same as mounting / and prefixing.
+     * The trimmed component goes through zone_from_name() -- the one name->zone
+     * map -- so this stays in step with in-session resolution and -i folds the
+     * mount location exactly as it folds a path's first component. */
     p = location;
     while (*p == '/')
         p++;
     n = strlen(p);
     while (n > 0 && p[n - 1] == '/')
         n--;
-    if (n == 0)
+    if (n == 0) {
         zone = ZONE_ROOT;
-    else if (n == 3 && strncmp(p, "pub", 3) == 0)
-        zone = ZONE_PUB;
-    else if (n == 8 && strncmp(p, "incoming", 8) == 0)
-        zone = ZONE_INCOMING;
-    else
+    } else if (n <= TNFS_MAX_NAME) {
+        memcpy(comp, p, n);
+        comp[n] = '\0';
+        zone = zone_from_name(comp);
+    } else {
         zone = -1;
+    }
 
     if (zone == ZONE_INCOMING && srv.inc_fd < 0)
         zone = -1;

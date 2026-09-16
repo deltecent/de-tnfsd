@@ -37,9 +37,17 @@ unsigned zone_caps(enum zone z)
 
 int zone_from_name(const char *name)
 {
-    if (strcmp(name, "pub") == 0)
+    /* The two zone names are fixed literals, so folding them under -i is a
+     * plain case-insensitive compare -- no directory scan and no ambiguity,
+     * since "pub" and "incoming" stay distinct under strcasecmp. This is the
+     * one name->zone map, so folding here covers both the mount location and
+     * the first component of every in-session path. */
+    int (*eq)(const char *, const char *) =
+        srv.ignore_case ? strcasecmp : strcmp;
+
+    if (eq(name, "pub") == 0)
         return ZONE_PUB;
-    if (strcmp(name, "incoming") == 0)
+    if (eq(name, "incoming") == 0)
         return ZONE_INCOMING;
     return -1;
 }

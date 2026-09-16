@@ -265,6 +265,14 @@ boundary:
   case-insensitive host filesystem the ambiguous case cannot arise; on a
   case-sensitive one two entries can differ only in case, and the first found
   wins.
+- **The two zone names fold as well.** `zone_from_name()` is the single
+  `name`→zone map, used both for a `MOUNT` location and for the first component
+  of an in-session path; under `-i` its comparison is `strcasecmp`, so `/PUB`
+  and `/INCOMING` reach `pub` and `incoming`. This needs no scan and admits no
+  ambiguity — the two names are fixed literals that stay distinct when folded —
+  and it changes only *which* zone a name selects, never that zone's
+  capabilities. Without it, a client that upper-cases the whole command line
+  (CP/M's CCP does) would clear the leaf fold only to be stopped at the zone.
 
 ### Per-fd capabilities
 

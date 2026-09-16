@@ -126,6 +126,9 @@ no notion of case: CP/M upper-cases every filename, and macOS and Windows users
 expect `HELLO.TXT` and `hello.txt` to reach the same file. With `-i`, a lookup
 that misses exactly retries against the directory's real entries using ASCII
 case folding, so any casing of an existing name resolves to the file on disk.
+The two zone names fold as well — `/PUB` and `/INCOMING` reach `pub` and
+`incoming`, whether as a mount location or as the first component of a path —
+so a client that upper-cases the whole command line is not stopped at the zone.
 
 The fold is narrow on purpose:
 

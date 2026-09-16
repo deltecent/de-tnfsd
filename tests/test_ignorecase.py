@@ -8,10 +8,15 @@ or a Mac/Windows user who typed "hello.txt", still reaches the real file. The
 fold is deliberately narrow:
 
   * it never overrides an exact match (exact wins, no scan);
-  * it applies to interior path components as well as the leaf;
+  * it applies to the zone name, interior path components, and the leaf;
   * it only ever *finds an existing name* -- a create keeps the requested
     spelling verbatim, so uploads to the drop box stay exact and two
     differently-cased names never collide there.
+
+The zone names pub/incoming fold too, so an all-uppercase client reaches
+/PUB and /INCOMING. Those are fixed synthetic labels rather than on-disk
+entries, so that half holds on any host filesystem and is not gated on a
+case-sensitive one.
 
 Usage: test_ignorecase.py [path/to/de-tnfsd]
 """
@@ -214,6 +219,82 @@ def check_dropbox_stays_exact(r, binary, transport):
         shutil.rmtree(base, ignore_errors=True)
 
 
+def check_zone_names_fold(r, binary, transport):
+    """Under -i the zone names fold, so an all-uppercase client reaches /PUB
+    and /INCOMING -- both as a MOUNT location and as the first component of an
+    in-session path. Zone names are synthetic, so this holds on any host FS."""
+    base = tempfile.mkdtemp(prefix="de-tnfsd-ic-zone-")
+    daemon = None
+    try:
+        root = build_split(base)
+        daemon = t.Daemon(binary, root, ["-i"], transport=transport)
+
+        # MOUNT folds the zone name.
+        for loc in ("/pub", "/PUB", "/Pub"):
+            cc = t.Client(daemon.port, transport=transport)
+            status, _ = cc.mount_raw(loc)
+            cc.close()
+            r.check_status(status, t.OK, "-i zone: MOUNT %s resolves pub" % loc)
+        cc = t.Client(daemon.port, transport=transport)
+        status, _ = cc.mount_raw("/INCOMING")
+        cc.close()
+        r.check_status(status, t.OK, "-i zone: MOUNT /INCOMING resolves incoming")
+
+        # From a "/" mount, the first component folds to the zone and the leaf
+        # folds too: a fully upper-cased path reaches the real mixed-case file.
+        c = daemon.client("/")
+        status, blob = c.read_all("/PUB/HELLO.TXT")
+        r.check(status == t.OK and blob == b"mixed case leaf\n",
+                "-i zone: /PUB/HELLO.TXT resolves from a / mount",
+                "(got %s)" % t.sname(status))
+        names = sorted(c.listdir("/PUB"))
+        r.check(names == ["HeLlo.TxT", "SubDir"],
+                "-i zone: OPENDIR /PUB lists pub", "(got %r)" % names)
+        c.close()
+
+        # An upper-cased upload path reaches the drop box; the leaf itself is a
+        # create, so it stays exactly as sent.
+        c = daemon.client("/")
+        status, h = c.open("/INCOMING/UPLOAD.BIN", t.O_WRONLY | t.O_CREAT)
+        r.check_status(status, t.OK,
+                       "-i zone: create via /INCOMING reaches the drop box")
+        if status == t.OK:
+            c.write(h, b"data")
+            c.close_file(h)
+        c.close()
+        r.check(os.path.exists(os.path.join(root, "incoming", "UPLOAD.BIN")),
+                "-i zone: the upload landed in incoming under its exact leaf name")
+    finally:
+        if daemon is not None:
+            daemon.stop()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def check_zone_names_exact_off(r, binary, transport):
+    """Without -i the zone names are exact: /PUB resolves nothing, as either a
+    MOUNT location or a path's first component. Independent of the host FS."""
+    base = tempfile.mkdtemp(prefix="de-tnfsd-ic-zoneoff-")
+    daemon = None
+    try:
+        root = build_split(base)
+        daemon = t.Daemon(binary, root, [], transport=transport)
+
+        cc = t.Client(daemon.port, transport=transport)
+        status, _ = cc.mount_raw("/PUB")
+        cc.close()
+        r.check_status(status, t.ENOENT, "no -i: MOUNT /PUB is exact, misses")
+
+        c = daemon.client("/")
+        status, _ = c.open("/PUB/HELLO.TXT", t.O_RDONLY)
+        r.check_status(status, t.ENOENT,
+                       "no -i: /PUB as a first component is exact, misses")
+        c.close()
+    finally:
+        if daemon is not None:
+            daemon.stop()
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def main(transport="udp"):
     binary = t.binary_from_argv()
     r = t.Results("ignore-case [%s]" % transport)
@@ -226,6 +307,10 @@ def main(transport="udp"):
 
     check_pub_readonly(r, binary, transport)
     check_create_stays_exact(r, binary, transport)
+    # Zone-name folding is a literal compare on synthetic labels, so it holds
+    # regardless of whether the host filesystem is case-sensitive.
+    check_zone_names_fold(r, binary, transport)
+    check_zone_names_exact_off(r, binary, transport)
     if sensitive:
         # These distinguish two casings of one name, which only a case-sensitive
         # host filesystem can hold; on macOS/Windows the host folds first.
