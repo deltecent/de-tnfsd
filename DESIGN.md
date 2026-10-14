@@ -379,7 +379,7 @@ box and return its filenames.
 | `WRITE` (0x22) | fd has no write cap → `EROFS` | yes |
 | `SEEK` (0x25) | yes | yes, within the file being written |
 | `CLOSE` (0x23) | yes | yes — see "finalization" below |
-| `STAT` (0x24) | full stat | **`EACCES`** for any name inside; the directory itself stats as a directory |
+| `STAT` (0x24) | full stat | **`ENOENT`** for any name inside, taken or not; the directory itself stats as a directory |
 | `UNLINK` (0x26) | `EROFS` | `EACCES` |
 | `CHMOD` (0x27) | `EROFS` | `EACCES` |
 | `RENAME` (0x28) | `EROFS` | `EACCES` |
@@ -423,6 +423,19 @@ which combinations are safe, the daemon does not implement the operation.
   the property the design actually rests on is that an uploaded file can never
   be read back, and knowing a name is taken is not much of a prize. It costs
   nothing to withhold, so it is withheld.
+- `STAT` on a name inside answers `ENOENT` for every name, taken or not,
+  without looking. FujiNet clients (the ESP32 firmware and `fujinet-pc`
+  alike, in `tnfs_open()`) `STAT` the target before every write-mode `OPEN`
+  and give up on any answer other than OK or `ENOENT`, so a refusal there
+  stops every upload they attempt before its `OPEN` is sent. Answering
+  `ENOENT` for a name that may exist bends the meaning of the code, but it
+  is a uniform answer, so it still tells a client nothing about what is in
+  the directory, and it involves no syscall. A taken name is still refused by
+  the `OPEN` that follows, with `EACCES` like every other refusal. Answering
+  `ENOENT` only for absent names would satisfy FujiNet just as well, but it
+  would hand out the existence check the zone withholds, with none of the
+  name validation, rate limiting, or quota gating that stands in front of an
+  `OPEN`.
 
 **File handle 0 is never handed out.** Handles are indices into a small
 per-session table, and nothing in the protocol reserves a value — but at
@@ -481,7 +494,7 @@ spec for `tests/test_dropbox.py`.
 |---|---|---|
 | 1 | `OPENDIR` / `OPENDIRX` on `incoming` | `EACCES`; zone has no LIST |
 | 2 | Recursive traverse from `/` or `/pub` reaching into `incoming` | no recursive traverse exists; a handle lists one directory (§4) |
-| 3 | `STAT` on a name inside `incoming` | `EACCES`; zone has no LOOKUP |
+| 3 | `STAT` on a name inside `incoming` | `ENOENT` for every name, taken or not, decided without a lookup; zone has no LOOKUP (§4) |
 | 4 | `OPEN` for read | zone has no READ; fd would be `O_WRONLY` regardless |
 | 5 | `O_EXCL` returning `EEXIST` on a name that exists | all refusals in the zone return `EACCES` |
 | 6 | Distinguishable errors — `ENOSPC` vs `EEXIST` vs `EINVAL` | quota and collision refusals both return `EACCES`; only name-syntax rejection differs, and that is a property of the request, not the directory |

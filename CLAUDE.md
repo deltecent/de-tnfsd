@@ -120,10 +120,15 @@ its checks by row number. Check any proposed change against that table.
   session. `struct server srv` holds config, dirfds, sockets, and drop-box
   counters, and nothing else belongs there.
 - **Refusals in `incoming` are uniformly `EACCES`** — name taken, quota met,
-  count met, read attempted, stat attempted. The documented exceptions are
-  `EINVAL` for a bad upload *name* (a property of the request, not the
-  directory) and `EFBIG` on a write past `-s`/`-q` (which describes the
-  client's own file).
+  count met, read attempted. The documented exceptions are `EINVAL` for a
+  bad upload *name* (a property of the request, not the directory) and
+  `EFBIG` on a write past `-s`/`-q` (which describes the client's own file).
+- **`STAT` in `incoming` answers `ENOENT` for every name, without looking.**
+  FujiNet clients `STAT` before every write-mode `OPEN` and give up on
+  anything but OK or `ENOENT`. The answer must stay uniform: never let it
+  depend on whether the name exists (no `fstatat`), or STAT becomes an
+  existence check that skips the name validation, rate limit, and quota in
+  front of `OPEN`.
 - **Uploads finalize by `linkat`, not `renameat`.** `renameat` would silently
   replace a file that appeared under the target name mid-upload, and
   overwriting is the one thing this zone must never do; `linkat` fails with

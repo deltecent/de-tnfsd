@@ -507,10 +507,15 @@ static size_t h_stat(struct req *q)
     }
 
     /* A name inside the drop box: the zone has no LOOKUP, so the daemon does
-     * not go and find out whether it exists. */
+     * not go and find out whether it exists. Every name answers ENOENT, taken
+     * or not. The answer is the same for all of them, so it says nothing
+     * about the directory, and it is the one FujiNet clients need: their
+     * tnfs_open() STATs the target before a write-mode OPEN and gives up on
+     * anything but OK or ENOENT. A taken name is still refused by the OPEN
+     * that follows. */
     if (!(r.caps & CAP_LOOKUP)) {
         resolved_release(&r);
-        return reply_status(q, TNFS_EACCES);
+        return reply_status(q, TNFS_ENOENT);
     }
 
     if (fstatat(r.dirfd, r.leaf, &st, AT_SYMLINK_NOFOLLOW) != 0) {

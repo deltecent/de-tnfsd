@@ -106,12 +106,25 @@ def main(transport="udp"):
                     "row 2: traverse of %s stays single-level" % path)
 
         # -- row 3: names inside it cannot be looked up -----------------
-        st_exists, _ = c.stat("/incoming/" + PLANTED)
-        st_absent, _ = c.stat("/incoming/definitely-not-there.dat")
-        r.check_status(st_exists, t.EACCES, "row 3: STAT an existing drop-box name")
-        r.check_status(st_absent, t.EACCES, "row 3: STAT an absent drop-box name")
-        r.check(st_exists == st_absent,
-                "row 3: present and absent names are indistinguishable")
+        # Every name answers ENOENT, taken or not: FujiNet clients STAT
+        # before every write-mode OPEN and give up on anything but OK or
+        # ENOENT, and a uniform answer says nothing about the directory.
+        # Names an upload OPEN would reject (dotfiles, bad characters, the
+        # daemon's own temp files) get the same answer, and so does every
+        # name once the drop box is full (checked with -n below).
+        dot = os.path.join(inc, ".hidden")
+        with open(dot, "wb") as f:
+            f.write(b"x")
+        try:
+            for name in (PLANTED, "definitely-not-there.dat", ".hidden",
+                         ".tmp-0123456789abcdef", "bad name?"):
+                status, info = c.stat("/incoming/" + name)
+                r.check_status(status, t.ENOENT,
+                               "row 3: STAT drop-box name %r" % name)
+                r.check(info is None,
+                        "row 3: no details come back for %r" % name)
+        finally:
+            os.unlink(dot)
         status, st = c.stat("/incoming")
         r.check(status == t.OK and statmod.S_ISDIR(st["mode"]),
                 "row 3: the drop box itself still stats as a directory")
@@ -300,8 +313,10 @@ def main(transport="udp"):
         r.check_status(full, t.EACCES, "-n: an upload into a full drop box")
         r.check(full == taken,
                 "row 6: 'full' and 'name taken' are the same status")
-        r.check(full == st_exists,
-                "row 6: ... and the same as a refused STAT")
+        for name in (PLANTED, "when-full.bin"):
+            status, _ = c.stat("/incoming/" + name)
+            r.check_status(status, t.ENOENT,
+                           "row 3: STAT %r with the drop box full" % name)
         r.check(not os.path.exists(os.path.join(inc, "when-full.bin")),
                 "-n: nothing lands when the limit is reached")
         c.close()
