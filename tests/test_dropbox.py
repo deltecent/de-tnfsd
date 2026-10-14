@@ -106,12 +106,15 @@ def main(transport="udp"):
                     "row 2: traverse of %s stays single-level" % path)
 
         # -- row 3: names inside it cannot be looked up -----------------
-        st_exists, _ = c.stat("/incoming/" + PLANTED)
+        # A STAT never returns a drop-box file's details. An absent name
+        # answers ENOENT: FujiNet clients STAT before every write-mode OPEN
+        # and give up on anything but OK or ENOENT. That says no more than
+        # an upload OPEN already does (row 5 refuses a taken name).
+        st_exists, info = c.stat("/incoming/" + PLANTED)
         st_absent, _ = c.stat("/incoming/definitely-not-there.dat")
         r.check_status(st_exists, t.EACCES, "row 3: STAT an existing drop-box name")
-        r.check_status(st_absent, t.EACCES, "row 3: STAT an absent drop-box name")
-        r.check(st_exists == st_absent,
-                "row 3: present and absent names are indistinguishable")
+        r.check(info is None, "row 3: no details come back for an existing name")
+        r.check_status(st_absent, t.ENOENT, "row 3: STAT an absent drop-box name")
         status, st = c.stat("/incoming")
         r.check(status == t.OK and statmod.S_ISDIR(st["mode"]),
                 "row 3: the drop box itself still stats as a directory")

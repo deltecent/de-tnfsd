@@ -423,6 +423,14 @@ which combinations are safe, the daemon does not implement the operation.
   the property the design actually rests on is that an uploaded file can never
   be read back, and knowing a name is taken is not much of a prize. It costs
   nothing to withhold, so it is withheld.
+- `STAT` on an absent name answers `ENOENT`, not `EACCES`. FujiNet clients
+  (fujinet-pc and the ESP32 firmware) `STAT` the target before every
+  write-mode `OPEN` and give up on any answer other than OK or `ENOENT`, so
+  a uniform `EACCES` there made every FujiNet upload fail before its `OPEN`
+  was sent. This gives away nothing new: an upload `OPEN` already succeeds
+  for an absent name and is refused for a taken one, and both answers come
+  from the same `fstatat`. A taken name still answers `EACCES`, with no size,
+  mode or dates.
 
 **File handle 0 is never handed out.** Handles are indices into a small
 per-session table, and nothing in the protocol reserves a value — but at
@@ -481,7 +489,7 @@ spec for `tests/test_dropbox.py`.
 |---|---|---|
 | 1 | `OPENDIR` / `OPENDIRX` on `incoming` | `EACCES`; zone has no LIST |
 | 2 | Recursive traverse from `/` or `/pub` reaching into `incoming` | no recursive traverse exists; a handle lists one directory (§4) |
-| 3 | `STAT` on a name inside `incoming` | `EACCES`; zone has no LOOKUP |
+| 3 | `STAT` on a name inside `incoming` | no details ever come back (zone has no LOOKUP): `EACCES` for a taken name, `ENOENT` for an absent one -- the same answer an upload `OPEN` gives, see §4 |
 | 4 | `OPEN` for read | zone has no READ; fd would be `O_WRONLY` regardless |
 | 5 | `O_EXCL` returning `EEXIST` on a name that exists | all refusals in the zone return `EACCES` |
 | 6 | Distinguishable errors — `ENOSPC` vs `EEXIST` vs `EINVAL` | quota and collision refusals both return `EACCES`; only name-syntax rejection differs, and that is a property of the request, not the directory |

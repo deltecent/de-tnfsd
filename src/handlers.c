@@ -506,11 +506,20 @@ static size_t h_stat(struct req *q)
         return reply_ok(q, len);
     }
 
-    /* A name inside the drop box: the zone has no LOOKUP, so the daemon does
-     * not go and find out whether it exists. */
+    /* A name inside the drop box: the zone has no LOOKUP, so a STAT never
+     * returns a file's details. But an absent name answers ENOENT, not
+     * EACCES: every FujiNet client (fujinet-pc and the ESP32 firmware's
+     * tnfs_open) STATs the target before a write-mode OPEN and gives up on
+     * any answer except OK or ENOENT, so a uniform EACCES here made every
+     * FujiNet upload fail before its OPEN was sent. This tells a client
+     * nothing that an upload OPEN does not: open_in_dropbox refuses a taken
+     * name with the same fstatat, so the two answers always agree. */
     if (!(r.caps & CAP_LOOKUP)) {
+        int absent = r.zone == ZONE_INCOMING &&
+                     fstatat(srv.inc_fd, r.leaf, &st, AT_SYMLINK_NOFOLLOW) != 0 &&
+                     errno == ENOENT;
         resolved_release(&r);
-        return reply_status(q, TNFS_EACCES);
+        return reply_status(q, absent ? TNFS_ENOENT : TNFS_EACCES);
     }
 
     if (fstatat(r.dirfd, r.leaf, &st, AT_SYMLINK_NOFOLLOW) != 0) {
